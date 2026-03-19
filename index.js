@@ -6,6 +6,7 @@ const Database = require('better-sqlite3');
 const jwt = require('jsonwebtoken');
 const bcrypt = require('bcryptjs');
 const path = require('path');
+const { execSync } = require('child_process');
 
 const app = express();
 app.use(cors());
@@ -590,6 +591,16 @@ app.post('/api/classes/leave', auth, (req, res) => {
   db.prepare('UPDATE users SET class_id = NULL WHERE id = ?').run(req.user.id);
   res.json({ ok: true });
 });
+
+app.get('/api/version', (req, res) => {
+  let commit = null
+  try {
+    commit = execSync('git rev-parse HEAD', { encoding: 'utf8' }).trim()
+  } catch (err) {
+    // ignore
+  }
+  res.json({ commit, time: new Date().toISOString() })
+})
 
 app.post('/api/students/invite', auth, (req, res) => {
   if (req.user.role !== 'teacher') return res.status(403).json({ error: 'Přístup zamítnut' });
