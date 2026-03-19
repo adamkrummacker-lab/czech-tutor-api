@@ -278,7 +278,18 @@ app.get('/api/students', auth, (req, res) => {
 
 // --- CHAT ---
 app.get('/api/chat/:topicId', auth, (req, res) => {
-  const msgs = db.prepare('SELECT role, content, timestamp FROM messages WHERE user_id = ? AND topic_id = ? ORDER BY id').all(req.user.id, req.params.topicId);
+  const userId = req.user.id;
+  const topicId = Number(req.params.topicId);
+
+  let msgs = db.prepare('SELECT id, role, content, timestamp FROM messages WHERE user_id = ? AND topic_id = ? ORDER BY id').all(userId, topicId);
+
+  // Pokud je konverzace prázdná, vytvoř úvodní zprávu od Káma (lektor) a ulož ji
+  if (msgs.length === 0) {
+    const intro = `Ahoj! Jsem Kámo, tvůj česky mluvící lektor. Budu se ptát a pomáhat ti zlepšit češtinu. Napiš mi, jak se máš, nebo co právě děláš. Prosím odpovídej CELÝMI větami.`;
+    db.prepare('INSERT INTO messages (user_id, topic_id, role, content) VALUES (?, ?, ?, ?)').run(userId, topicId, 'assistant', intro);
+    msgs = db.prepare('SELECT id, role, content, timestamp FROM messages WHERE user_id = ? AND topic_id = ? ORDER BY id').all(userId, topicId);
+  }
+
   res.json(msgs);
 });
 
