@@ -54,6 +54,14 @@ db.exec(`
     content TEXT NOT NULL,
     timestamp TEXT DEFAULT (datetime('now'))
   );
+  CREATE TABLE IF NOT EXISTS message_reactions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    message_id INTEGER REFERENCES messages(id) ON DELETE CASCADE,
+    user_id INTEGER REFERENCES users(id),
+    emoji TEXT NOT NULL,
+    created_at TEXT DEFAULT (datetime('now')),
+    UNIQUE(message_id, user_id, emoji)
+  );
   CREATE TABLE IF NOT EXISTS vocabulary (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     user_id INTEGER REFERENCES users(id),
@@ -110,22 +118,16 @@ const TOPIC_TEMPLATES = [
   { title: 'Cestování po ČR', description: 'Student plánuje výlet po České republice a ptá se na zajímavá místa.', level: 'B1' },
 ];
 
+const DAILY_TIPS = [
+  'Dnešní tip: Zkus používat slovesa v přítomném čase v celých větách.',
+  'Tip dne: Když nevíš slovo, popiš ho jinak – například místo „auto“ můžeš říct „vozidlo“.',
+  'Tip dne: Nejistě se cítíš? Zopakuj si minulý příběh v několika větách.',
+  'Tip dne: Zkus v odpovědi použít slovo „protože“ nebo „když“.',
+  'Tip dne: Napiš alespoň dvě věty (nejen jedno slovo).'
+];
+
 // --- BADGE DEFINITIONS ---
 const BADGE_DEFS = {
-  first_message: { name: 'První zpráva', emoji: '🎯', desc: 'Poslal/a jsi první zprávu' },
-  messages_10: { name: 'Konverzátor', emoji: '💬', desc: '10 zpráv odesláno' },
-  messages_50: { name: 'Řečník', emoji: '🗣️', desc: '50 zpráv odesláno' },
-  messages_100: { name: 'Mistr slova', emoji: '📚', desc: '100 zpráv odesláno' },
-  topics_3: { name: 'Průzkumník', emoji: '🧭', desc: '3 témata vyzkoušena' },
-  topics_5: { name: 'Polyglot', emoji: '🌍', desc: '5 témat vyzkoušena' },
-  streak_3: { name: 'Na vlně', emoji: '🔥', desc: '3 dny v řadě' },
-  streak_7: { name: 'Vytrvlý', emoji: '⚡', desc: '7 dní v řadě' },
-  vocab_10: { name: 'Sběratel slov', emoji: '📖', desc: '10 slov ve slovníčku' },
-  xp_100: { name: 'Začátečník', emoji: '⭐', desc: '100 XP nasbíráno' },
-  xp_500: { name: 'Pokročilý', emoji: '🏆', desc: '500 XP nasbíráno' },
-};
-
-function checkAndAwardBadges(userId) {
   const user = db.prepare('SELECT * FROM users WHERE id = ?').get(userId);
   const msgCount = db.prepare('SELECT COUNT(*) as cnt FROM messages WHERE user_id = ? AND role = ?').get(userId, 'user').cnt;
   const topicCount = db.prepare('SELECT COUNT(DISTINCT topic_id) as cnt FROM messages WHERE user_id = ? AND role = ?').get(userId, 'user').cnt;
@@ -295,6 +297,13 @@ app.get('/api/templates', auth, (req, res) => {
   res.json(TOPIC_TEMPLATES);
 });
 
+app.get('/api/daily-tip', auth, (req, res) => {
+  const today = new Date();
+  const idx = today.getDate() + today.getMonth() * 31;
+  const tip = DAILY_TIPS[idx % DAILY_TIPS.length];
+  res.json({ tip });
+});
+
 // --- STUDENTS ---
 app.get('/api/students', auth, (req, res) => {
   const students = db.prepare("SELECT id, name, username, xp, streak FROM users WHERE role = 'student'").all();
@@ -315,12 +324,60 @@ app.get('/api/chat/:topicId', auth, (req, res) => {
     msgs = db.prepare('SELECT id, role, content, timestamp FROM messages WHERE user_id = ? AND topic_id = ? ORDER BY id').all(userId, topicId);
   }
 
+  // Přidej reakce k jednotlivým zprávám
+  const messageIds = msgs.map(m => m.id);
+  if (messageIds.length > 0) {
+    const reactions = db.prepare(
+      `SELECT message_id, emoji, COUNT(*) as count, SUM(CASE WHEN user_id = ? THEN 1 ELSE 0 END) as me
+       FROM message_reactions
+       WHERE message_id IN (${messageIds.map(() => '?').join(',')})
+       GROUP BY message_id, emoji`
+    ).all(userId, ...messageIds);
+
+    const reactionsByMessage = {};
+    for (const r of reactions) {
+      if (!reactionsByMessage[r.message_id]) reactionsByMessage[r.message_id] = [];
+      reactionsByMessage[r.message_id].push({ emoji: r.emoji, count: r.count, me: !!r.me });
+    }
+    msgs = msgs.map(m => ({ ...m, reactions: reactionsByMessage[m.id] || [] }));
+  }
+
   res.json(msgs);
 });
 
 app.get('/api/chat/:topicId/student/:studentId', auth, (req, res) => {
   const msgs = db.prepare('SELECT role, content, timestamp FROM messages WHERE user_id = ? AND topic_id = ? ORDER BY id').all(req.params.studentId, req.params.topicId);
   res.json(msgs);
+});
+
+app.post('/api/chat/:topicId/messages/:messageId/reactions', auth, (req, res) => {
+  const userId = req.user.id;
+  const { emoji } = req.body;
+  const messageId = Number(req.params.messageId);
+  if (!emoji) return res.status(400).json({ error: 'Chybí emoji' });
+
+  // Toggle reaction (add / remove)
+  const existing = db.prepare('SELECT id FROM message_reactions WHERE message_id = ? AND user_id = ? AND emoji = ?').get(messageId, userId, emoji);
+  if (existing) {
+    db.prepare('DELETE FROM message_reactions WHERE id = ?').run(existing.id);
+  } else {
+    db.prepare('INSERT INTO message_reactions (message_id, user_id, emoji) VALUES (?, ?, ?)').run(messageId, userId, emoji);
+  }
+
+  const reactions = db.prepare(
+    'SELECT emoji, COUNT(*) as count, SUM(CASE WHEN user_id = ? THEN 1 ELSE 0 END) as me FROM message_reactions WHERE message_id = ? GROUP BY emoji'
+  ).all(userId, messageId);
+
+  res.json({ reactions: reactions.map(r => ({ emoji: r.emoji, count: r.count, me: !!r.me })) });
+});
+
+app.get('/api/chat/:topicId/messages/:messageId/reactions', auth, (req, res) => {
+  const userId = req.user.id;
+  const messageId = Number(req.params.messageId);
+  const reactions = db.prepare(
+    'SELECT emoji, COUNT(*) as count, SUM(CASE WHEN user_id = ? THEN 1 ELSE 0 END) as me FROM message_reactions WHERE message_id = ? GROUP BY emoji'
+  ).all(userId, messageId);
+  res.json({ reactions: reactions.map(r => ({ emoji: r.emoji, count: r.count, me: !!r.me })) });
 });
 
 app.post('/api/chat/:topicId', auth, async (req, res) => {
@@ -331,7 +388,8 @@ app.post('/api/chat/:topicId', auth, async (req, res) => {
   if (!topic) return res.status(404).json({ error: 'Téma nenalezeno' });
 
   // Save user message
-  db.prepare('INSERT INTO messages (user_id, topic_id, role, content) VALUES (?, ?, ?, ?)').run(userId, topicId, 'user', message);
+  const userMsgResult = db.prepare('INSERT INTO messages (user_id, topic_id, role, content) VALUES (?, ?, ?, ?)').run(userId, topicId, 'user', message);
+  const userMessageId = userMsgResult.lastInsertRowid;
 
   // Update streak & XP
   updateStreak(userId);
@@ -377,13 +435,24 @@ Pravidla:
     const completion = await openai.chat.completions.create({ model: 'gpt-4o-mini', messages });
     const aiMessage = completion.choices[0].message.content;
 
-    db.prepare('INSERT INTO messages (user_id, topic_id, role, content) VALUES (?, ?, ?, ?)').run(userId, topicId, 'assistant', aiMessage);
+    const assistantMsgResult = db.prepare('INSERT INTO messages (user_id, topic_id, role, content) VALUES (?, ?, ?, ?)').run(userId, topicId, 'assistant', aiMessage);
+    const assistantMessageId = assistantMsgResult.lastInsertRowid;
+
     db.prepare('UPDATE users SET xp = xp + 3 WHERE id = ?').run(userId);
 
     const newBadges = checkAndAwardBadges(userId);
     const user = db.prepare('SELECT xp, streak FROM users WHERE id = ?').get(userId);
 
-    res.json({ reply: aiMessage, xp: user.xp, streak: user.streak, newBadges: newBadges.map(k => BADGE_DEFS[k]), messageCount: userMsgCount, minMessages });
+    res.json({
+      reply: aiMessage,
+      assistantMessageId,
+      userMessageId,
+      xp: user.xp,
+      streak: user.streak,
+      newBadges: newBadges.map(k => BADGE_DEFS[k]),
+      messageCount: userMsgCount,
+      minMessages,
+    });
   } catch (err) {
     console.error('OpenAI error:', err.message);
     res.status(500).json({ error: 'Chyba při komunikaci s AI: ' + err.message });
@@ -512,6 +581,17 @@ app.get('/api/chat/:topicId/evaluation', auth, (req, res) => {
     grade: evaluation.grade,
     created_at: evaluation.created_at,
   });
+});
+
+app.get('/api/me/evaluations', auth, (req, res) => {
+  const rows = db
+    .prepare(`SELECT e.id, e.topic_id, t.title as topic, e.score, e.grade, e.created_at
+      FROM evaluations e
+      JOIN topics t ON t.id = e.topic_id
+      WHERE e.student_id = ?
+      ORDER BY e.created_at DESC`)
+    .all(req.user.id);
+  res.json(rows);
 });
 
 // --- CHAT EXPORT ---
