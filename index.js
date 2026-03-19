@@ -14,6 +14,13 @@ app.use(express.json());
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 const JWT_SECRET = process.env.JWT_SECRET || 'czech-tutor-secret-key-2026';
 
+function generateJoinCode(length = 6) {
+  const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+  let code = '';
+  for (let i = 0; i < length; i++) code += chars[Math.floor(Math.random() * chars.length)];
+  return code;
+}
+
 // --- DATABASE SETUP ---
 const db = new Database(path.join(__dirname, 'czech-tutor.db'));
 db.pragma('journal_mode = WAL');
@@ -29,6 +36,13 @@ db.exec(`
     xp INTEGER DEFAULT 0,
     streak INTEGER DEFAULT 0,
     last_active TEXT,
+    created_at TEXT DEFAULT (datetime('now'))
+  );
+  CREATE TABLE IF NOT EXISTS classes (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT NOT NULL,
+    teacher_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
+    join_code TEXT UNIQUE NOT NULL,
     created_at TEXT DEFAULT (datetime('now'))
   );
   CREATE TABLE IF NOT EXISTS topics (
@@ -88,10 +102,13 @@ db.exec(`
   );
 `);
 
-// Ensure preferences column exists (JSON blob)
+// Ensure preferences + class_id columns exist (JSON blob + class membership)
 const userColumns = db.prepare("PRAGMA table_info(users)").all().map(r => r.name);
 if (!userColumns.includes('preferences')) {
   db.prepare("ALTER TABLE users ADD COLUMN preferences TEXT DEFAULT '{}' ").run();
+}
+if (!userColumns.includes('class_id')) {
+  db.prepare("ALTER TABLE users ADD COLUMN class_id INTEGER").run();
 }
 
 // Seed default users if empty
@@ -102,6 +119,30 @@ if (userCount === 0) {
   db.prepare('INSERT INTO users (username, password, role, name) VALUES (?, ?, ?, ?)').run('ucitel', hash1, 'teacher', 'Učitel');
   db.prepare('INSERT INTO users (username, password, role, name) VALUES (?, ?, ?, ?)').run('zak', hash2, 'student', 'Žák Adam');
   console.log('Default users created');
+
+  // Create a default class for the teacher and add the default student into it
+  const teacher = db.prepare('SELECT * FROM users WHERE username = ?').get('ucitel');
+  const student = db.prepare('SELECT * FROM users WHERE username = ?').get('zak');
+  if (teacher && student) {
+    const existing = db.prepare('SELECT * FROM classes WHERE teacher_id = ?').get(teacher.id);
+    if (!existing) {
+      const joinCode = generateJoinCode();
+      const classResult = db.prepare('INSERT INTO classes (name, teacher_id, join_code) VALUES (?, ?, ?)').run('1.A - Třída', teacher.id, joinCode);
+      db.prepare('UPDATE users SET class_id = ? WHERE id = ?').run(classResult.lastInsertRowid, student.id);
+      console.log('Default class created (code:', joinCode, ')');
+    }
+  }
+}
+
+// Ensure every teacher has at least one class (so students can join)
+const teachers = db.prepare("SELECT * FROM users WHERE role = 'teacher'").all();
+for (const t of teachers) {
+  const cls = db.prepare('SELECT * FROM classes WHERE teacher_id = ?').get(t.id);
+  if (!cls) {
+    const joinCode = generateJoinCode();
+    db.prepare('INSERT INTO classes (name, teacher_id, join_code) VALUES (?, ?, ?)').run(`${t.name} - Třída`, t.id, joinCode);
+    console.log(`Created class for teacher ${t.name} (code: ${joinCode})`);
+  }
 }
 
 // --- TOPIC TEMPLATES ---
@@ -127,7 +168,7 @@ const DAILY_TIPS = [
 ];
 
 // --- BADGE DEFINITIONS ---
-const BADGE_DEFS = {
+function checkAndAwardBadges(userId) {
   const user = db.prepare('SELECT * FROM users WHERE id = ?').get(userId);
   const msgCount = db.prepare('SELECT COUNT(*) as cnt FROM messages WHERE user_id = ? AND role = ?').get(userId, 'user').cnt;
   const topicCount = db.prepare('SELECT COUNT(DISTINCT topic_id) as cnt FROM messages WHERE user_id = ? AND role = ?').get(userId, 'user').cnt;
@@ -197,7 +238,7 @@ app.post('/api/auth/login', (req, res) => {
 });
 
 app.post('/api/auth/register', (req, res) => {
-  const { username, password, name } = req.body;
+  const { username, password, name, classCode } = req.body;
   if (!username || !password || !name) return res.status(400).json({ error: 'Vyplň všechna pole' });
   if (username.length < 3) return res.status(400).json({ error: 'Uživatelské jméno musí mít min. 3 znaky' });
   if (password.length < 4) return res.status(400).json({ error: 'Heslo musí mít min. 4 znaky' });
@@ -205,11 +246,21 @@ app.post('/api/auth/register', (req, res) => {
   const existing = db.prepare('SELECT id FROM users WHERE username = ?').get(username);
   if (existing) return res.status(409).json({ error: 'Uživatelské jméno je obsazené' });
 
+  let classId = null;
+  let classInfo = null;
+  if (classCode) {
+    const cls = db.prepare('SELECT * FROM classes WHERE join_code = ?').get(classCode.trim().toUpperCase());
+    if (!cls) return res.status(404).json({ error: 'Třída nenalezena' });
+    classId = cls.id;
+    classInfo = cls;
+  }
+
   const hash = bcrypt.hashSync(password, 10);
-  const result = db.prepare('INSERT INTO users (username, password, role, name) VALUES (?, ?, ?, ?)').run(username, hash, 'student', name);
+  const result = db.prepare('INSERT INTO users (username, password, role, name, class_id) VALUES (?, ?, ?, ?, ?)').run(username, hash, 'student', name, classId);
   const token = jwt.sign({ id: result.lastInsertRowid, role: 'student' }, JWT_SECRET, { expiresIn: '7d' });
-  res.status(201).json({ id: result.lastInsertRowid, username, role: 'student', name, token, preferences: {} });
+  res.status(201).json({ id: result.lastInsertRowid, username, role: 'student', name, token, preferences: {}, class: classInfo });
 });
+
 
 // --- USER PREFERENCES ---
 app.get('/api/me/preferences', auth, (req, res) => {
@@ -304,10 +355,81 @@ app.get('/api/daily-tip', auth, (req, res) => {
   res.json({ tip });
 });
 
-// --- STUDENTS ---
+// --- STUDENTS + CLASSES ---
 app.get('/api/students', auth, (req, res) => {
-  const students = db.prepare("SELECT id, name, username, xp, streak FROM users WHERE role = 'student'").all();
+  // Teachers only: show students in their classes
+  if (req.user.role !== 'teacher') return res.status(403).json({ error: 'Přístup zamítnut' });
+
+  const students = db.prepare(
+    `SELECT u.id, u.name, u.username, u.xp, u.streak, u.class_id, c.name as class_name
+     FROM users u
+     JOIN classes c ON u.class_id = c.id
+     WHERE c.teacher_id = ?`
+  ).all(req.user.id);
   res.json(students);
+});
+
+app.get('/api/classes', auth, (req, res) => {
+  if (req.user.role === 'teacher') {
+    const classes = db.prepare('SELECT * FROM classes WHERE teacher_id = ?').all(req.user.id);
+    const students = db.prepare('SELECT id, name, username, xp, streak, class_id FROM users WHERE class_id IN (SELECT id FROM classes WHERE teacher_id = ?)').all(req.user.id);
+    const studentsByClass = {};
+    for (const s of students) {
+      studentsByClass[s.class_id] = studentsByClass[s.class_id] || [];
+      studentsByClass[s.class_id].push(s);
+    }
+    const result = classes.map(c => ({ ...c, students: studentsByClass[c.id] || [] }));
+    return res.json(result);
+  }
+
+  // Students: return their own class info
+  const cls = db.prepare(
+    `SELECT c.*, u.name as teacher_name
+     FROM classes c
+     JOIN users u ON u.id = c.teacher_id
+     WHERE c.id = ?`
+  ).get(req.user.class_id);
+  if (!cls) return res.json(null);
+  res.json(cls);
+});
+
+app.get('/api/classes/me', auth, (req, res) => {
+  // Shortcut for current user
+  if (req.user.role === 'teacher') {
+    const classes = db.prepare('SELECT * FROM classes WHERE teacher_id = ?').all(req.user.id);
+    return res.json({ role: 'teacher', classes });
+  }
+
+  const user = db.prepare('SELECT class_id FROM users WHERE id = ?').get(req.user.id);
+  if (!user?.class_id) return res.json({ role: 'student' });
+
+  const cls = db.prepare(
+    `SELECT c.*, u.name as teacher_name
+     FROM classes c
+     JOIN users u ON u.id = c.teacher_id
+     WHERE c.id = ?`
+  ).get(user.class_id);
+  if (!cls) return res.json({ role: 'student' });
+  res.json({ role: 'student', class: cls });
+});
+
+app.post('/api/classes', auth, (req, res) => {
+  if (req.user.role !== 'teacher') return res.status(403).json({ error: 'Přístup zamítnut' });
+  const { name } = req.body;
+  if (!name || !name.trim()) return res.status(400).json({ error: 'Název třídy je povinný' });
+  const joinCode = generateJoinCode();
+  const result = db.prepare('INSERT INTO classes (name, teacher_id, join_code) VALUES (?, ?, ?)').run(name.trim(), req.user.id, joinCode);
+  res.status(201).json({ id: result.lastInsertRowid, name: name.trim(), teacher_id: req.user.id, join_code: joinCode });
+});
+
+app.post('/api/classes/join', auth, (req, res) => {
+  if (req.user.role !== 'student') return res.status(403).json({ error: 'Přístup zamítnut' });
+  const { code } = req.body;
+  if (!code) return res.status(400).json({ error: 'Kód třídy je povinný' });
+  const cls = db.prepare('SELECT * FROM classes WHERE join_code = ?').get(code.trim().toUpperCase());
+  if (!cls) return res.status(404).json({ error: 'Třída nenalezena' });
+  db.prepare('UPDATE users SET class_id = ? WHERE id = ?').run(cls.id, req.user.id);
+  res.json({ class: cls });
 });
 
 // --- CHAT ---
