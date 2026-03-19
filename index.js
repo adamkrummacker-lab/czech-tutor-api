@@ -167,6 +167,20 @@ const DAILY_TIPS = [
   'Tip dne: Napiš alespoň dvě věty (nejen jedno slovo).'
 ];
 
+const BADGE_DEFS = {
+  first_message: { name: 'První zpráva', emoji: '🎯', desc: 'Poslal/a jsi první zprávu' },
+  messages_10: { name: 'Konverzátor', emoji: '💬', desc: '10 zpráv odesláno' },
+  messages_50: { name: 'Řečník', emoji: '🗣️', desc: '50 zpráv odesláno' },
+  messages_100: { name: 'Mistr slova', emoji: '📚', desc: '100 zpráv odesláno' },
+  topics_3: { name: 'Průzkumník', emoji: '🧭', desc: '3 témata vyzkoušena' },
+  topics_5: { name: 'Polyglot', emoji: '🌍', desc: '5 témat vyzkoušena' },
+  streak_3: { name: 'Na vlně', emoji: '🔥', desc: '3 dny v řadě' },
+  streak_7: { name: 'Vytrvalý', emoji: '⚡', desc: '7 dní v řadě' },
+  vocab_10: { name: 'Sběratel slov', emoji: '📖', desc: '10 slov ve slovníčku' },
+  xp_100: { name: 'Začátečník', emoji: '⭐', desc: '100 XP nasbíráno' },
+  xp_500: { name: 'Pokročilý', emoji: '🏆', desc: '500 XP nasbíráno' },
+};
+
 // --- BADGE DEFINITIONS ---
 function checkAndAwardBadges(userId) {
   const user = db.prepare('SELECT * FROM users WHERE id = ?').get(userId);
