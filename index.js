@@ -104,6 +104,14 @@ const TOPIC_TEMPLATES = [
   { title: 'Cestování po ČR', description: 'Student plánuje výlet po České republice a ptá se na zajímavá místa.', level: 'B1' },
 ];
 
+const DAILY_TIPS = [
+  { title: 'Slovo dne', text: '„pohodový“ – znamená „klidný, uvolněný“. Například: „Dnes mám pohodový den.“' },
+  { title: 'Tip dne', text: 'Když chceš říct „I like it“, můžeš říct „Líbí se mi to.“' },
+  { title: 'Tip dne', text: 'Pro otázku „Kde je…?“ použij „Kde je?“ + místo (např. „Kde je nejbližší kavárna?“).' },
+  { title: 'Slovo dne', text: '„běhat“ znamená „run“. Například: „Každý den běhám v parku.“' },
+  { title: 'Tip dne', text: 'Opisuj větu, pokud si nejsi jistý: „Můžeš to napsat jinak?“' },
+];
+
 // --- BADGE DEFINITIONS ---
 const BADGE_DEFS = {
   first_message: { name: 'První zpráva', emoji: '🎯', desc: 'Poslal/a jsi první zprávu' },
@@ -202,6 +210,12 @@ app.post('/api/auth/register', (req, res) => {
 });
 
 // --- TOPICS ---
+app.get('/api/daily-tip', auth, (req, res) => {
+  const day = new Date().toISOString().slice(0, 10)
+  const idx = [...day].reduce((sum, ch) => sum + ch.charCodeAt(0), 0) % DAILY_TIPS.length
+  res.json(DAILY_TIPS[idx])
+})
+
 app.get('/api/topics', auth, (req, res) => {
   if (req.user.role === 'teacher') {
     const topics = db.prepare('SELECT * FROM topics ORDER BY created_at DESC').all();
