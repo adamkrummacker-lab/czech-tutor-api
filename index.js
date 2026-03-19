@@ -448,6 +448,12 @@ app.post('/api/classes/join', auth, (req, res) => {
   res.json({ class: cls });
 });
 
+app.post('/api/classes/leave', auth, (req, res) => {
+  if (req.user.role !== 'student') return res.status(403).json({ error: 'Přístup zamítnut' });
+  db.prepare('UPDATE users SET class_id = NULL WHERE id = ?').run(req.user.id);
+  res.json({ ok: true });
+});
+
 // --- CHAT ---
 app.get('/api/chat/:topicId', auth, (req, res) => {
   const userId = req.user.id;
