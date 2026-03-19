@@ -100,6 +100,14 @@ db.exec(`
     created_at TEXT DEFAULT (datetime('now')),
     updated_at TEXT DEFAULT (datetime('now'))
   );
+  CREATE TABLE IF NOT EXISTS lectures (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    teacher_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
+    topic_id INTEGER REFERENCES topics(id) ON DELETE CASCADE,
+    title TEXT NOT NULL,
+    content TEXT NOT NULL,
+    created_at TEXT DEFAULT (datetime('now'))
+  );
   CREATE TABLE IF NOT EXISTS badges (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     user_id INTEGER REFERENCES users(id),
@@ -943,6 +951,75 @@ app.get('/api/chat/:topicId/evaluation', auth, (req, res) => {
     grade: evaluation.grade,
     created_at: evaluation.created_at,
   });
+});
+
+// --- LECTURES CRUD ---
+app.get('/api/lectures', auth, (req, res) => {
+  if (req.user.role !== 'teacher') return res.status(403).json({ error: 'Přístup zamítnut' });
+
+  const lectures = db.prepare(`
+    SELECT l.*, t.title as topic_title 
+    FROM lectures l
+    LEFT JOIN topics t ON t.id = l.topic_id
+    WHERE l.teacher_id = ?
+    ORDER BY l.created_at DESC
+  `).all(req.user.id);
+  
+  res.json(lectures);
+});
+
+app.post('/api/lectures', auth, (req, res) => {
+  if (req.user.role !== 'teacher') return res.status(403).json({ error: 'Přístup zamítnut' });
+
+  const { title, content, topicId } = req.body;
+  
+  if (!title || !title.trim()) {
+    return res.status(400).json({ error: 'Název přednášky je povinný' });
+  }
+  
+  if (!content || !content.trim()) {
+    return res.status(400).json({ error: 'Obsah přednášky je povinný' });
+  }
+
+  try {
+    const result = db.prepare(`
+      INSERT INTO lectures (teacher_id, topic_id, title, content, created_at)
+      VALUES (?, ?, ?, ?, datetime('now'))
+    `).run(
+      req.user.id,
+      topicId || null,
+      title.trim(),
+      content.trim()
+    );
+
+    res.json({ 
+      id: result.lastInsertRowid,
+      message: 'Přednáška vytvořena' 
+    });
+  } catch (err) {
+    console.error('Lecture creation error:', err);
+    res.status(500).json({ error: 'Chyba při vytváření přednášky' });
+  }
+});
+
+app.delete('/api/lectures/:id', auth, (req, res) => {
+  if (req.user.role !== 'teacher') return res.status(403).json({ error: 'Přístup zamítnut' });
+
+  try {
+    const result = db.prepare(`
+      DELETE FROM lectures 
+      WHERE id = ? AND teacher_id = ?
+    `).run(req.params.id, req.user.id);
+
+    if (result.changes === 0) {
+      return res.status(404).json({ error: 'Přednáška nenalezena' });
+    }
+
+    res.json({ message: 'Přednáška smazána' });
+  } catch (err) {
+    console.error('Lecture deletion error:', err);
+    res.status(500).json({ error: 'Chyba při mazání přednášky' });
+  }
 });
 
 app.get('/api/me/evaluations', auth, (req, res) => {
