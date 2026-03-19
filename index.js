@@ -21,6 +21,13 @@ function generateJoinCode(length = 6) {
   return code;
 }
 
+function generatePassword(length = 10) {
+  const chars = 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
+  let password = '';
+  for (let i = 0; i < length; i++) password += chars[Math.floor(Math.random() * chars.length)];
+  return password;
+}
+
 // --- DATABASE SETUP ---
 const db = new Database(path.join(__dirname, 'czech-tutor.db'));
 db.pragma('journal_mode = WAL');
@@ -83,6 +90,16 @@ db.exec(`
     translation TEXT,
     context_sentence TEXT,
     created_at TEXT DEFAULT (datetime('now'))
+  );
+  CREATE TABLE IF NOT EXISTS ai_instructions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    teacher_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
+    topic_id INTEGER REFERENCES topics(id) ON DELETE CASCADE,
+    instructions TEXT NOT NULL,
+    is_global BOOLEAN DEFAULT FALSE,
+    created_at TEXT DEFAULT (datetime('now')),
+    updated_at TEXT DEFAULT (datetime('now')),
+    UNIQUE(teacher_id, topic_id)
   );
   CREATE TABLE IF NOT EXISTS badges (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -371,6 +388,112 @@ app.get('/api/daily-tip', auth, (req, res) => {
   res.json({ tip });
 });
 
+// --- AI INSTRUCTIONS ---
+app.get('/api/ai-instructions', auth, (req, res) => {
+  if (req.user.role !== 'teacher') return res.status(403).json({ error: 'Přístup zamítnut' });
+
+  const { topicId } = req.query;
+  let instructions;
+  
+  if (topicId) {
+    // Get specific topic instructions
+    instructions = db.prepare(`
+      SELECT ai.*, t.title as topic_title 
+      FROM ai_instructions ai
+      LEFT JOIN topics t ON ai.topic_id = t.id
+      WHERE ai.teacher_id = ? AND ai.topic_id = ?
+    `).get(req.user.id, topicId);
+  } else {
+    // Get all instructions for this teacher
+    instructions = db.prepare(`
+      SELECT ai.*, t.title as topic_title 
+      FROM ai_instructions ai
+      LEFT JOIN topics t ON ai.topic_id = t.id
+      WHERE ai.teacher_id = ?
+      ORDER BY ai.is_global DESC, ai.updated_at DESC
+    `).all(req.user.id);
+  }
+  
+  res.json(instructions);
+});
+
+app.post('/api/ai-instructions', auth, (req, res) => {
+  if (req.user.role !== 'teacher') return res.status(403).json({ error: 'Přístup zamítnut' });
+
+  const { topicId, instructions, isGlobal } = req.body;
+  
+  if (!instructions || !instructions.trim()) {
+    return res.status(400).json({ error: 'Instrukce nemohou být prázdné' });
+  }
+
+  try {
+    const result = db.prepare(`
+      INSERT OR REPLACE INTO ai_instructions 
+      (teacher_id, topic_id, instructions, is_global, updated_at) 
+      VALUES (?, ?, ?, ?, datetime('now'))
+    `).run(
+      req.user.id,
+      topicId || null,
+      instructions.trim(),
+      isGlobal || false
+    );
+
+    res.json({ 
+      id: result.lastInsertRowid,
+      message: 'AI instrukce uloženy' 
+    });
+  } catch (err) {
+    console.error('AI instructions save error:', err);
+    res.status(500).json({ error: 'Chyba při ukládání instrukcí' });
+  }
+});
+
+app.put('/api/ai-instructions/:id', auth, (req, res) => {
+  if (req.user.role !== 'teacher') return res.status(403).json({ error: 'Přístup zamítnut' });
+
+  const { id } = req.params;
+  const { instructions, isGlobal } = req.body;
+
+  if (!instructions || !instructions.trim()) {
+    return res.status(400).json({ error: 'Instrukce nemohou být prázdné' });
+  }
+
+  const existing = db.prepare('SELECT id FROM ai_instructions WHERE id = ? AND teacher_id = ?').get(id, req.user.id);
+  if (!existing) return res.status(404).json({ error: 'Instrukce nenalezeny' });
+
+  try {
+    db.prepare(`
+      UPDATE ai_instructions 
+      SET instructions = ?, is_global = ?, updated_at = datetime('now')
+      WHERE id = ? AND teacher_id = ?
+    `).run(
+      instructions.trim(),
+      isGlobal || false,
+      id,
+      req.user.id
+    );
+
+    res.json({ message: 'AI instrukce aktualizovány' });
+  } catch (err) {
+    console.error('AI instructions update error:', err);
+    res.status(500).json({ error: 'Chyba při aktualizaci instrukcí' });
+  }
+});
+
+app.delete('/api/ai-instructions/:id', auth, (req, res) => {
+  if (req.user.role !== 'teacher') return res.status(403).json({ error: 'Přístup zamítnut' });
+
+  const { id } = req.params;
+
+  const result = db.prepare('DELETE FROM ai_instructions WHERE id = ? AND teacher_id = ?').run(id, req.user.id);
+  
+  if (result.changes === 0) {
+    return res.status(404).json({ error: 'Instrukce nenalezeny' });
+  }
+
+  res.json({ message: 'AI instrukce smazány' });
+});
+
 // --- STUDENTS + CLASSES ---
 app.get('/api/students', auth, (req, res) => {
   // Teachers only: show students in their classes
@@ -545,6 +668,27 @@ app.post('/api/chat/:topicId', auth, async (req, res) => {
   const minMessages = topic.min_messages || 10;
   const remaining = Math.max(0, minMessages - userMsgCount);
 
+  // Get AI instructions
+  let aiInstructions = '';
+  const student = db.prepare('SELECT class_id FROM users WHERE id = ?').get(userId);
+  if (student && student.class_id) {
+    const teacherClass = db.prepare('SELECT c.teacher_id FROM classes c WHERE c.id = ?').get(student.class_id);
+    if (teacherClass) {
+      // Get topic-specific instructions first, then global
+      const topicInstruction = db.prepare(`
+        SELECT instructions FROM ai_instructions 
+        WHERE teacher_id = ? AND topic_id = ?
+      `).get(teacherClass.teacher_id, topicId);
+      
+      const globalInstruction = db.prepare(`
+        SELECT instructions FROM ai_instructions 
+        WHERE teacher_id = ? AND is_global = TRUE
+      `).get(teacherClass.teacher_id);
+      
+      aiInstructions = topicInstruction?.instructions || globalInstruction?.instructions || '';
+    }
+  }
+
   const levelDesc = { A1: 'úplný začátečník', A2: 'mírně pokročilý', B1: 'středně pokročilý', B2: 'pokročilý', C1: 'velmi pokročilý' };
   const levelGuidelines = {
     A1: 'Používej velmi jednoduché věty (max. 4-6 slov), základní slovní zásobu, především přítomný čas, a vysvětluj nová slova příklady.',
@@ -558,16 +702,13 @@ app.post('/api/chat/:topicId', auth, async (req, res) => {
 Úroveň studenta: ${topic.level} (${levelDesc[topic.level] || 'mírně pokročilý'}).
 Styl odpovědí: ${levelGuidelines[topic.level] || levelGuidelines.A2}
 Student odeslal ${userMsgCount} z ${minMessages} zpráv. ${remaining <= 3 && remaining > 0 ? 'Konverzace se blíží ke konci!' : ''}
+${aiInstructions ? `\nDodatečné instrukce od učitele:\n${aiInstructions}` : ''}
 
 Pravidla:
 - Komunikuj POUZE česky
-- Přizpůsob složitost jazyka úrovni ${topic.level} (viz výše)
-- Pokud student udělá gramatickou chybu, jemně ho oprav a vysvětli proč
-- Ptej se vždy jen jednu otázku v každé odpovědi a rozhodně se neptat na ano/ne. Pokud věta přirozeně vyznívá jako ano/ne otázka, přetvoř ji na otevřenou otázku vyžadující delší odpověď.
-- Buď povzbudivý a trpělivý
-- Pokud student píše v jiném jazyce, odpověz česky a povzbuď ho aby psal česky
-- Odpovídej stručně (2-4 věty), aby konverzace byla přirozená
-- Vždy pobízej studenta, aby odpovídal CELÝMI VĚTAMI. Pokud student odpoví jen jedním slovem nebo krátkou frází, pochval ho za snahu, ale požádej ho, aby to řekl celou větou. Například: "Výborně! Zkus to teď říct celou větou."
+- Buď přátelský a povzbudivý
+- Přizpůsob slovní zásobu úrovni studenta
+- Ptej se na detaily a udržuj konverzaci
 - Pokud studentovi zbývá málo zpráv do konce, upozorni ho: "Blížíme se ke konci, zkus shrnout, co ses naučil/a."`;
 
   const messages = [
@@ -617,6 +758,27 @@ app.post('/api/chat/:topicId/retry', auth, async (req, res) => {
   const minMessages = topic.min_messages || 10;
   const remaining = Math.max(0, minMessages - userMsgCount);
 
+  // Get AI instructions
+  let aiInstructions = '';
+  const student = db.prepare('SELECT class_id FROM users WHERE id = ?').get(userId);
+  if (student && student.class_id) {
+    const teacherClass = db.prepare('SELECT c.teacher_id FROM classes c WHERE c.id = ?').get(student.class_id);
+    if (teacherClass) {
+      // Get topic-specific instructions first, then global
+      const topicInstruction = db.prepare(`
+        SELECT instructions FROM ai_instructions 
+        WHERE teacher_id = ? AND topic_id = ?
+      `).get(teacherClass.teacher_id, topicId);
+      
+      const globalInstruction = db.prepare(`
+        SELECT instructions FROM ai_instructions 
+        WHERE teacher_id = ? AND is_global = TRUE
+      `).get(teacherClass.teacher_id);
+      
+      aiInstructions = topicInstruction?.instructions || globalInstruction?.instructions || '';
+    }
+  }
+
   const levelDesc = { A1: 'úplný začátečník', A2: 'mírně pokročilý', B1: 'středně pokročilý', B2: 'pokročilý', C1: 'velmi pokročilý' };
   const levelGuidelines = {
     A1: 'Používej velmi jednoduché věty (max. 4-6 slov), základní slovní zásobu, především přítomný čas, a vysvětluj nová slova příklady.',
@@ -630,16 +792,13 @@ app.post('/api/chat/:topicId/retry', auth, async (req, res) => {
 Úroveň studenta: ${topic.level} (${levelDesc[topic.level] || 'mírně pokročilý'}).
 Styl odpovědí: ${levelGuidelines[topic.level] || levelGuidelines.A2}
 Student odeslal ${userMsgCount} z ${minMessages} zpráv. ${remaining <= 3 && remaining > 0 ? 'Konverzace se blíží ke konci!' : ''}
+${aiInstructions ? `\nDodatečné instrukce od učitele:\n${aiInstructions}` : ''}
 
 Pravidla:
 - Komunikuj POUZE česky
-- Přizpůsob složitost jazyka úrovni ${topic.level} (viz výše)
-- Pokud student udělá gramatickou chybu, jemně ho oprav a vysvětli proč
-- Ptej se vždy jen jednu otázku v každé odpovědi a rozhodně se neptat na ano/ne. Pokud věta přirozeně vyznívá jako ano/ne otázka, přetvoř ji na otevřenou otázku vyžadující delší odpověď.
-- Buď povzbudivý a trpělivý
-- Pokud student píše v jiném jazyce, odpověz česky a povzbuď ho aby psal česky
-- Odpovídej stručně (2-4 věty), aby konverzace byla přirozená
-- Vždy pobízej studenta, aby odpovídal CELÝMI VĚTAMI. Pokud student odpoví jen jedním slovem nebo krátkou frází, pochval ho za snahu, ale požádej ho, aby to řekl celou větou. Například: "Výborně! Zkus to teď říct celou větou."
+- Buď přátelský a povzbudivý
+- Přizpůsob slovní zásobu úrovni studenta
+- Ptej se na detaily a udržuj konverzaci
 - Pokud studentovi zbývá málo zpráv do konce, upozorni ho: "Blížíme se ke konci, zkus shrnout, co ses naučil/a."`;
 
   const messages = [
