@@ -1,3 +1,5 @@
 node_modules/
 .env
 czech-tutor.db
+czech-tutor.db-wal
+czech-tutor.db-shm
