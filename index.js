@@ -184,6 +184,8 @@ const BADGE_DEFS = {
 // --- BADGE DEFINITIONS ---
 function checkAndAwardBadges(userId) {
   const user = db.prepare('SELECT * FROM users WHERE id = ?').get(userId);
+  if (!user) return; // User might have been deleted; don't crash the badge endpoint
+
   const msgCount = db.prepare('SELECT COUNT(*) as cnt FROM messages WHERE user_id = ? AND role = ?').get(userId, 'user').cnt;
   const topicCount = db.prepare('SELECT COUNT(DISTINCT topic_id) as cnt FROM messages WHERE user_id = ? AND role = ?').get(userId, 'user').cnt;
   const vocabCount = db.prepare('SELECT COUNT(*) as cnt FROM vocabulary WHERE user_id = ?').get(userId).cnt;
@@ -737,6 +739,8 @@ app.delete('/api/vocabulary/:id', auth, (req, res) => {
 // --- GAMIFICATION ---
 app.get('/api/gamification', auth, (req, res) => {
   const user = db.prepare('SELECT xp, streak FROM users WHERE id = ?').get(req.user.id);
+  if (!user) return res.status(404).json({ error: 'Uživatel nenalezen' });
+
   const badgeRows = db.prepare('SELECT badge_key, earned_at FROM badges WHERE user_id = ?').all(req.user.id);
   const badges = badgeRows.map(b => ({ ...BADGE_DEFS[b.badge_key], key: b.badge_key, earned_at: b.earned_at }));
   const allBadges = Object.entries(BADGE_DEFS).map(([key, def]) => ({
