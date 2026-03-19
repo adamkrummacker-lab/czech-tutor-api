@@ -1060,14 +1060,14 @@ app.post('/api/lecture-assignments', auth, (req, res) => {
     db.prepare('DELETE FROM lecture_assignments WHERE lecture_id = ?').run(lectureId);
     
     // Create new assignments
-    const result = db.prepare(`
+    const stmt = db.prepare(`
       INSERT INTO lecture_assignments (teacher_id, lecture_id, student_id, created_at)
       VALUES (?, ?, ?, datetime('now'))
-    `).run(
-      req.user.id,
-      lectureId,
-      studentIds.map(id => [req.user.id, id])
-    );
+    `);
+    
+    studentIds.forEach(studentId => {
+      stmt.run(req.user.id, lectureId, studentId);
+    });
 
     res.json({ 
       message: 'Studenti přiřazeni k přednášce',
