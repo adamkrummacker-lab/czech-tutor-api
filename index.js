@@ -1124,10 +1124,13 @@ app.get('/api/my-lectures', auth, (req, res) => {
 
 // --- LECTURE CHAT ---
 app.post('/api/chat/lecture/:lectureId', auth, async (req, res) => {
+  console.log('Lecture chat API called by:', req.user.username, 'role:', req.user.role);
   if (req.user.role !== 'student') return res.status(403).json({ error: 'Přístup zamítnut' });
 
   const { message, lectureContent } = req.body;
   const { lectureId } = req.params;
+  
+  console.log('Lecture chat request:', { lectureId, messageLength: message?.length, hasLectureContent: !!lectureContent });
 
   try {
     // Verify student has access to this lecture
@@ -1139,8 +1142,11 @@ app.post('/api/chat/lecture/:lectureId', auth, async (req, res) => {
     `).get(req.user.id, lectureId);
 
     if (!assignment) {
+      console.log('Student does not have access to lecture:', lectureId);
       return res.status(403).json({ error: 'Nemáte přístup k této přednášce' });
     }
+
+    console.log('Student has access to lecture:', assignment.title);
 
     // Create system prompt with lecture content
     const systemPrompt = `Jsi AI učitel češtiny. Student právě studuje následující přednášku:
@@ -1154,6 +1160,8 @@ Odpovídej na otázky studenta týkající se této přednášky. Pomáháj mu s
       { role: "user", content: message }
     ];
 
+    console.log('Sending to OpenAI...');
+
     const completion = await openai.chat.completions.create({
       model: "gpt-3.5-turbo",
       messages,
@@ -1162,6 +1170,7 @@ Odpovídej na otázky studenta týkající se této přednášky. Pomáháj mu s
     });
 
     const reply = completion.choices[0].message.content;
+    console.log('OpenAI response received, length:', reply?.length);
 
     // Save message (optional - for lecture tracking)
     const userMsgId = db.prepare(`
