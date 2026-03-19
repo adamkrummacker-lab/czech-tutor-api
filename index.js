@@ -954,12 +954,8 @@ app.get('/api/me/evaluations', auth, (req, res) => {
       FROM evaluations e
       JOIN topics t ON t.id = e.topic_id
       JOIN users u ON u.id = e.student_id
-      LEFT JOIN classes c ON c.id = u.class_id
-      WHERE c.teacher_id = ? OR c.teacher_id IS NULL AND u.id IN (
-        SELECT student_id FROM topic_assignments ta
-        JOIN topics t ON t.id = ta.topic_id
-        WHERE t.teacher_id = ?
-      )
+      JOIN classes c ON c.id = u.class_id
+      WHERE c.teacher_id = ?
       ORDER BY e.created_at DESC
     `).all(req.user.id);
   } else {
