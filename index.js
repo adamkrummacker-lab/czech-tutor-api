@@ -1122,6 +1122,70 @@ app.get('/api/my-lectures', auth, (req, res) => {
   }
 });
 
+// --- LECTURE CHAT ---
+app.post('/api/chat/lecture/:lectureId', auth, async (req, res) => {
+  if (req.user.role !== 'student') return res.status(403).json({ error: 'Přístup zamítnut' });
+
+  const { message, lectureContent } = req.body;
+  const { lectureId } = req.params;
+
+  try {
+    // Verify student has access to this lecture
+    const assignment = db.prepare(`
+      SELECT la.*, l.title, l.content
+      FROM lecture_assignments la
+      JOIN lectures l ON l.id = la.lecture_id
+      WHERE la.student_id = ? AND la.lecture_id = ?
+    `).get(req.user.id, lectureId);
+
+    if (!assignment) {
+      return res.status(403).json({ error: 'Nemáte přístup k této přednášce' });
+    }
+
+    // Create system prompt with lecture content
+    const systemPrompt = `Jsi AI učitel češtiny. Student právě studuje následující přednášku:
+
+${lectureContent}
+
+Odpovídej na otázky studenta týkající se této přednášky. Pomáháj mu s porozuměním, vysvětluj nejasnosti a poskytuj doplňující informace. Mluv česky a přátelsky.`;
+
+    const messages = [
+      { role: "system", content: systemPrompt },
+      { role: "user", content: message }
+    ];
+
+    const completion = await openai.chat.completions.create({
+      model: "gpt-3.5-turbo",
+      messages,
+      max_tokens: 500,
+      temperature: 0.7,
+    });
+
+    const reply = completion.choices[0].message.content;
+
+    // Save message (optional - for lecture tracking)
+    const userMsgId = db.prepare(`
+      INSERT INTO messages (user_id, topic_id, role, content, created_at)
+      VALUES (?, ?, ?, ?, datetime('now'))
+    `).run(req.user.id, lectureId, 'user', message).lastInsertRowid;
+
+    const assistantMsgId = db.prepare(`
+      INSERT INTO messages (user_id, topic_id, role, content, created_at)
+      VALUES (?, ?, ?, ?, datetime('now'))
+    `).run(req.user.id, lectureId, 'assistant', reply).lastInsertRowid;
+
+    res.json({ 
+      reply,
+      userMessageId: userMsgId,
+      assistantMessageId: assistantMsgId
+    });
+
+  } catch (error) {
+    console.error('Lecture chat error:', error);
+    res.status(500).json({ error: 'Chyba při zpracování chatu' });
+  }
+});
+
 app.get('/api/me/evaluations', auth, (req, res) => {
   let rows;
   if (req.user.role === 'teacher') {
