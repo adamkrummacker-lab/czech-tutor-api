@@ -69,6 +69,15 @@ db.exec(`
     earned_at TEXT DEFAULT (datetime('now')),
     UNIQUE(user_id, badge_key)
   );
+  CREATE TABLE IF NOT EXISTS evaluations (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    topic_id INTEGER REFERENCES topics(id) ON DELETE CASCADE,
+    student_id INTEGER REFERENCES users(id),
+    score INTEGER,
+    grade TEXT,
+    evaluation TEXT,
+    created_at TEXT DEFAULT (datetime('now'))
+  );
 `);
 
 // Seed default users if empty
@@ -360,23 +369,48 @@ Konverzace:
 ${history.map(m => `${m.role === 'user' ? 'Student' : 'Lektor'}: ${m.content}`).join('\n')}
 
 Vytvoř hodnocení v tomto formátu (česky):
-1. **Celkové hodnocení** (1-10 bodů)
-2. **Silné stránky** (co student zvládl dobře)
-3. **Oblasti ke zlepšení** (gramatika, slovní zásoba, plynulost)
-4. **Počet gramatických chyb** a příklady
-5. **Doporučení** pro další procvičování
-6. **Nová slovíčka** – doporuč 5 slov k nastudování
+- score: číslo 1-10 (1=nejhorší, 10=nejlepší)
+- grade: školní známka 1-5 (1=nejlepší, 5=nejhorší)
+- evaluation: souhrn hodnocení (1-2 odstavce)
+- strengths: silné stránky
+- improvements: oblasti ke zlepšení
 
-Buď konstruktivní a povzbudivý.`;
+Odpověď ulož jako čistý JSON (žádný jiný text).`;
 
   try {
     const completion = await openai.chat.completions.create({
       model: 'gpt-4o-mini',
       messages: [{ role: 'user', content: evalPrompt }],
     });
+
+    const raw = completion.choices[0].message.content;
+    let parsed = null;
+    try {
+      parsed = JSON.parse(raw);
+    } catch {
+      const match = raw.match(/\{[\s\S]*\}/);
+      if (match) {
+        try {
+          parsed = JSON.parse(match[0]);
+        } catch {
+          parsed = null;
+        }
+      }
+    }
+
+    const score = parsed?.score != null ? Number(parsed.score) : null;
+    const grade = parsed?.grade || null;
+    const evaluationText = parsed?.evaluation || raw;
+
+    // Store evaluation record
+    db.prepare(
+      'INSERT INTO evaluations (topic_id, student_id, score, grade, evaluation) VALUES (?, ?, ?, ?, ?)'
+    ).run(topicId, userId, score, grade, evaluationText);
+
     // Award bonus XP for completing evaluation
     db.prepare('UPDATE users SET xp = xp + 20 WHERE id = ?').run(userId);
-    res.json({ evaluation: completion.choices[0].message.content });
+
+    res.json({ evaluation: evaluationText, score, grade });
   } catch (err) {
     console.error('Evaluation error:', err.message);
     res.status(500).json({ error: 'Chyba při hodnocení: ' + err.message });
@@ -426,6 +460,22 @@ app.get('/api/stats', auth, (req, res) => {
     return { ...s, msgCount, aiMsgCount, topicCount, vocabCount, badgeCount };
   });
   res.json(stats);
+});
+
+// --- CHAT EVALUATION ---
+app.get('/api/chat/:topicId/evaluation', auth, (req, res) => {
+  const topicId = Number(req.params.topicId);
+  const studentId = req.query.studentId ? Number(req.query.studentId) : req.user.id;
+  const evaluation = db
+    .prepare('SELECT * FROM evaluations WHERE topic_id = ? AND student_id = ? ORDER BY id DESC LIMIT 1')
+    .get(topicId, studentId);
+  if (!evaluation) return res.json({ evaluation: null });
+  res.json({
+    evaluation: evaluation.evaluation,
+    score: evaluation.score,
+    grade: evaluation.grade,
+    created_at: evaluation.created_at,
+  });
 });
 
 // --- CHAT EXPORT ---
