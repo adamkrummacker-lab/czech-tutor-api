@@ -946,13 +946,28 @@ app.get('/api/chat/:topicId/evaluation', auth, (req, res) => {
 });
 
 app.get('/api/me/evaluations', auth, (req, res) => {
-  const rows = db
-    .prepare(`SELECT e.id, e.topic_id, t.title as topic, e.score, e.grade, e.created_at
+  let rows;
+  if (req.user.role === 'teacher') {
+    // Teachers see all evaluations for their students
+    rows = db.prepare(`
+      SELECT e.id, e.topic_id, t.title as topic, e.score, e.grade, e.created_at, u.name as student_name, u.username as student_username
+      FROM evaluations e
+      JOIN topics t ON t.id = e.topic_id
+      JOIN users u ON u.id = e.student_id
+      JOIN classes c ON c.id = u.class_id
+      WHERE c.teacher_id = ?
+      ORDER BY e.created_at DESC
+    `).all(req.user.id);
+  } else {
+    // Students see only their own evaluations
+    rows = db.prepare(`
+      SELECT e.id, e.topic_id, t.title as topic, e.score, e.grade, e.created_at
       FROM evaluations e
       JOIN topics t ON t.id = e.topic_id
       WHERE e.student_id = ?
-      ORDER BY e.created_at DESC`)
-    .all(req.user.id);
+      ORDER BY e.created_at DESC
+    `).all(req.user.id);
+  }
   res.json(rows);
 });
 
