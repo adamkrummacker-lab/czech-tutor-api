@@ -459,6 +459,64 @@ Pravidla:
   }
 });
 
+app.post('/api/chat/:topicId/retry', auth, async (req, res) => {
+  const userId = req.user.id;
+  const topicId = Number(req.params.topicId);
+  const topic = db.prepare('SELECT * FROM topics WHERE id = ?').get(topicId);
+  if (!topic) return res.status(404).json({ error: 'Téma nenalezeno' });
+
+  const lastUserMsg = db.prepare('SELECT content FROM messages WHERE user_id = ? AND topic_id = ? AND role = ? ORDER BY id DESC LIMIT 1').get(userId, topicId, 'user');
+  if (!lastUserMsg) return res.status(400).json({ error: 'Žádná uživatelská zpráva k zopakování' });
+
+  const history = db.prepare('SELECT role, content FROM messages WHERE user_id = ? AND topic_id = ? ORDER BY id').all(userId, topicId);
+  const userMsgCount = history.filter(m => m.role === 'user').length;
+  const minMessages = topic.min_messages || 10;
+  const remaining = Math.max(0, minMessages - userMsgCount);
+
+  const levelDesc = { A1: 'úplný začátečník', A2: 'mírně pokročilý', B1: 'středně pokročilý', B2: 'pokročilý', C1: 'velmi pokročilý' };
+  const levelGuidelines = {
+    A1: 'Používej velmi jednoduché věty (max. 4-6 slov), základní slovní zásobu, především přítomný čas, a vysvětluj nová slova příklady.',
+    A2: 'Používej jednoduché až mírně složité věty, vysvětluj novou slovní zásobu v kontextu a dej příklady.',
+    B1: 'Používej přirozenou, plynulou řeč s občasnou strečovou větou; vysvětli složitější výrazy a nabídni alternativy.',
+    B2: 'Používej pokročilé větné struktury, spojky, podmínkové věty a idiomy; ptej se na detaily i abstraktní témata.',
+    C1: 'Používej bohatý slovník, složité větné konstrukce a idiomy; pokládej otevřené otázky a diskutuj nuance.'
+  };
+
+  const systemPrompt = `Jsi přátelský lektor českého jazyka. Tvé jméno je Kámo. Vedeš konverzaci se studentem na téma: "${topic.title}" (${topic.description}).
+Úroveň studenta: ${topic.level} (${levelDesc[topic.level] || 'mírně pokročilý'}).
+Styl odpovědí: ${levelGuidelines[topic.level] || levelGuidelines.A2}
+Student odeslal ${userMsgCount} z ${minMessages} zpráv. ${remaining <= 3 && remaining > 0 ? 'Konverzace se blíží ke konci!' : ''}
+
+Pravidla:
+- Komunikuj POUZE česky
+- Přizpůsob složitost jazyka úrovni ${topic.level} (viz výše)
+- Pokud student udělá gramatickou chybu, jemně ho oprav a vysvětli proč
+- Ptej se vždy jen jednu otázku v každé odpovědi a rozhodně se neptat na ano/ne. Pokud věta přirozeně vyznívá jako ano/ne otázka, přetvoř ji na otevřenou otázku vyžadující delší odpověď.
+- Buď povzbudivý a trpělivý
+- Pokud student píše v jiném jazyce, odpověz česky a povzbuď ho aby psal česky
+- Odpovídej stručně (2-4 věty), aby konverzace byla přirozená
+- Vždy pobízej studenta, aby odpovídal CELÝMI VĚTAMI. Pokud student odpoví jen jedním slovem nebo krátkou frází, pochval ho za snahu, ale požádej ho, aby to řekl celou větou. Například: "Výborně! Zkus to teď říct celou větou."
+- Pokud studentovi zbývá málo zpráv do konce, upozorni ho: "Blížíme se ke konci, zkus shrnout, co ses naučil/a."`;
+
+  const messages = [
+    { role: 'system', content: systemPrompt },
+    ...history.map(m => ({ role: m.role, content: m.content })),
+  ];
+
+  try {
+    const completion = await openai.chat.completions.create({ model: 'gpt-4o-mini', messages });
+    const aiMessage = completion.choices[0].message.content;
+
+    const assistantMsgResult = db.prepare('INSERT INTO messages (user_id, topic_id, role, content) VALUES (?, ?, ?, ?)').run(userId, topicId, 'assistant', aiMessage);
+    const assistantMessageId = assistantMsgResult.lastInsertRowid;
+
+    res.json({ reply: aiMessage, assistantMessageId });
+  } catch (err) {
+    console.error('OpenAI retry error:', err.message);
+    res.status(500).json({ error: 'Chyba při opakování: ' + err.message });
+  }
+});
+
 // --- CONVERSATION EVALUATION ---
 app.post('/api/chat/:topicId/evaluate', auth, async (req, res) => {
   const userId = req.body.studentId || req.user.id;
@@ -468,19 +526,19 @@ app.post('/api/chat/:topicId/evaluate', auth, async (req, res) => {
 
   if (history.length < 2) return res.status(400).json({ error: 'Příliš málo zpráv pro hodnocení' });
 
-  const evalPrompt = `Jsi odborník na hodnocení studentů českého jazyka. Zhodnoť následující konverzaci studenta (úroveň ${topic.level}) na téma "${topic.title}".
+  const evalPrompt = `Jsi laskavý a povzbudivý hodnotitel českého jazyka. Hodnocení bude především o tom, aby se žák cítil motivovaný (ne odraděný). Zhodnoť následující konverzaci studenta (úroveň ${topic.level}) na téma "${topic.title}".
 
 Konverzace:
 ${history.map(m => `${m.role === 'user' ? 'Student' : 'Lektor'}: ${m.content}`).join('\n')}
 
-Vytvoř hodnocení v tomto formátu (česky):
-- score: číslo 1-10 (1=nejhorší, 10=nejlepší)
-- grade: školní známka 1-5 (1=nejlepší, 5=nejhorší)
-- evaluation: souhrn hodnocení (1-2 odstavce)
+Udělej hodnocení v tomto formátu (česky):
+- score: číslo 1-10 (1=potřebuje více tréninku, 10=skvělé)
+- grade: školní známka 1-5 (1=skvělé, 5=potřebuje zlepšení)
+- evaluation: přátelské shrnutí, co bylo nejlepší a co je dobré trénovat dál (1-2 odstavce)
 - strengths: silné stránky
-- improvements: oblasti ke zlepšení
+- improvements: oblasti ke zlepšení (doporučení)
 
-Odpověď ulož jako čistý JSON (žádný jiný text).`;
+Buď co nejkonkrétnější a laskavý. Odpověď ulož jako čistý JSON (žádný jiný text).`;
 
   try {
     const completion = await openai.chat.completions.create({
