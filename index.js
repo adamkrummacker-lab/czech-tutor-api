@@ -80,6 +80,12 @@ db.exec(`
   );
 `);
 
+// Ensure preferences column exists (JSON blob)
+const userColumns = db.prepare("PRAGMA table_info(users)").all().map(r => r.name);
+if (!userColumns.includes('preferences')) {
+  db.prepare("ALTER TABLE users ADD COLUMN preferences TEXT DEFAULT '{}' ").run();
+}
+
 // Seed default users if empty
 const userCount = db.prepare('SELECT COUNT(*) as cnt FROM users').get().cnt;
 if (userCount === 0) {
@@ -102,14 +108,6 @@ const TOPIC_TEMPLATES = [
   { title: 'Telefonování', description: 'Student volá na úřad nebo do firmy a řeší záležitost po telefonu.', level: 'B1' },
   { title: 'Vyprávění o víkendu', description: 'Student popisuje, co dělal o víkendu, a ptá se partnera na jeho plány.', level: 'A2' },
   { title: 'Cestování po ČR', description: 'Student plánuje výlet po České republice a ptá se na zajímavá místa.', level: 'B1' },
-];
-
-const DAILY_TIPS = [
-  { title: 'Slovo dne', text: '„pohodový“ – znamená „klidný, uvolněný“. Například: „Dnes mám pohodový den.“' },
-  { title: 'Tip dne', text: 'Když chceš říct „I like it“, můžeš říct „Líbí se mi to.“' },
-  { title: 'Tip dne', text: 'Pro otázku „Kde je…?“ použij „Kde je?“ + místo (např. „Kde je nejbližší kavárna?“).' },
-  { title: 'Slovo dne', text: '„běhat“ znamená „run“. Například: „Každý den běhám v parku.“' },
-  { title: 'Tip dne', text: 'Opisuj větu, pokud si nejsi jistý: „Můžeš to napsat jinak?“' },
 ];
 
 // --- BADGE DEFINITIONS ---
@@ -191,7 +189,9 @@ app.post('/api/auth/login', (req, res) => {
     return res.status(401).json({ error: 'Špatné přihlašovací údaje' });
   }
   const token = jwt.sign({ id: user.id, role: user.role }, JWT_SECRET, { expiresIn: '7d' });
-  res.json({ id: user.id, username: user.username, role: user.role, name: user.name, token });
+  let preferences = {};
+  try { preferences = user.preferences ? JSON.parse(user.preferences) : {}; } catch {}
+  res.json({ id: user.id, username: user.username, role: user.role, name: user.name, preferences, token });
 });
 
 app.post('/api/auth/register', (req, res) => {
@@ -206,16 +206,27 @@ app.post('/api/auth/register', (req, res) => {
   const hash = bcrypt.hashSync(password, 10);
   const result = db.prepare('INSERT INTO users (username, password, role, name) VALUES (?, ?, ?, ?)').run(username, hash, 'student', name);
   const token = jwt.sign({ id: result.lastInsertRowid, role: 'student' }, JWT_SECRET, { expiresIn: '7d' });
-  res.status(201).json({ id: result.lastInsertRowid, username, role: 'student', name, token });
+  res.status(201).json({ id: result.lastInsertRowid, username, role: 'student', name, token, preferences: {} });
+});
+
+// --- USER PREFERENCES ---
+app.get('/api/me/preferences', auth, (req, res) => {
+  const user = db.prepare('SELECT preferences FROM users WHERE id = ?').get(req.user.id);
+  let preferences = {};
+  try { preferences = user?.preferences ? JSON.parse(user.preferences) : {}; } catch {}
+  res.json(preferences);
+});
+
+app.put('/api/me/preferences', auth, (req, res) => {
+  const existing = db.prepare('SELECT preferences FROM users WHERE id = ?').get(req.user.id);
+  let preferences = {};
+  try { preferences = existing?.preferences ? JSON.parse(existing.preferences) : {}; } catch {}
+  const updated = { ...preferences, ...req.body };
+  db.prepare('UPDATE users SET preferences = ? WHERE id = ?').run(JSON.stringify(updated), req.user.id);
+  res.json(updated);
 });
 
 // --- TOPICS ---
-app.get('/api/daily-tip', auth, (req, res) => {
-  const day = new Date().toISOString().slice(0, 10)
-  const idx = [...day].reduce((sum, ch) => sum + ch.charCodeAt(0), 0) % DAILY_TIPS.length
-  res.json(DAILY_TIPS[idx])
-})
-
 app.get('/api/topics', auth, (req, res) => {
   if (req.user.role === 'teacher') {
     const topics = db.prepare('SELECT * FROM topics ORDER BY created_at DESC').all();
