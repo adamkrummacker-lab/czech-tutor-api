@@ -299,13 +299,22 @@ app.post('/api/chat/:topicId', auth, async (req, res) => {
   const remaining = Math.max(0, minMessages - userMsgCount);
 
   const levelDesc = { A1: 'úplný začátečník', A2: 'mírně pokročilý', B1: 'středně pokročilý', B2: 'pokročilý', C1: 'velmi pokročilý' };
+  const levelGuidelines = {
+    A1: 'Používej velmi jednoduché věty (max. 4-6 slov), základní slovní zásobu, především přítomný čas, a vysvětluj nová slova příklady.',
+    A2: 'Používej jednoduché až mírně složité věty, vysvětluj novou slovní zásobu v kontextu a dej příklady.',
+    B1: 'Používej přirozenou, plynulou řeč s občasnou strečovou větou; vysvětli složitější výrazy a nabídni alternativy.',
+    B2: 'Používej pokročilé větné struktury, spojky, podmínkové věty a idiomy; ptej se na detaily i abstraktní témata.',
+    C1: 'Používej bohatý slovník, složité větné konstrukce a idiomy; pokládej otevřené otázky a diskutuj nuance.'
+  };
+
   const systemPrompt = `Jsi přátelský lektor českého jazyka. Vedeš konverzaci se studentem na téma: "${topic.title}" (${topic.description}).
 Úroveň studenta: ${topic.level} (${levelDesc[topic.level] || 'mírně pokročilý'}).
+Styl odpovědí: ${levelGuidelines[topic.level] || levelGuidelines.A2}
 Student odeslal ${userMsgCount} z ${minMessages} zpráv. ${remaining <= 3 && remaining > 0 ? 'Konverzace se blíží ke konci!' : ''}
 
 Pravidla:
 - Komunikuj POUZE česky
-- Přizpůsob složitost jazyka úrovni ${topic.level}
+- Přizpůsob složitost jazyka úrovni ${topic.level} (viz výše)
 - Pokud student udělá gramatickou chybu, jemně ho oprav a vysvětli proč
 - Ptej se otázky a veď konverzaci k tématu
 - Buď povzbudivý a trpělivý
