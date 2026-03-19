@@ -1101,18 +1101,25 @@ app.delete('/api/lecture-assignments/:id', auth, (req, res) => {
 
 // --- STUDENT LECTURES ---
 app.get('/api/my-lectures', auth, (req, res) => {
+  console.log('Student lectures API called by:', req.user.username, 'role:', req.user.role);
   if (req.user.role !== 'student') return res.status(403).json({ error: 'Přístup zamítnut' });
 
-  const lectures = db.prepare(`
-    SELECT l.*, la.created_at as assigned_at, t.title as topic_title
-    FROM lecture_assignments la
-    JOIN lectures l ON l.id = la.lecture_id
-    LEFT JOIN topics t ON t.id = l.topic_id
-    WHERE la.student_id = ?
-    ORDER BY la.created_at DESC
-  `).all(req.user.id);
-  
-  res.json(lectures);
+  try {
+    const lectures = db.prepare(`
+      SELECT l.*, la.created_at as assigned_at, t.title as topic_title
+      FROM lecture_assignments la
+      JOIN lectures l ON l.id = la.lecture_id
+      LEFT JOIN topics t ON t.id = l.topic_id
+      WHERE la.student_id = ?
+      ORDER BY la.created_at DESC
+    `).all(req.user.id);
+    
+    console.log('Found lectures for student:', lectures.length);
+    res.json(lectures);
+  } catch (err) {
+    console.error('Error fetching student lectures:', err);
+    res.status(500).json({ error: 'Chyba při načítání přednášek' });
+  }
 });
 
 app.get('/api/me/evaluations', auth, (req, res) => {
