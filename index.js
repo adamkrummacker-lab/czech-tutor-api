@@ -98,8 +98,7 @@ db.exec(`
     instructions TEXT NOT NULL,
     is_global BOOLEAN DEFAULT FALSE,
     created_at TEXT DEFAULT (datetime('now')),
-    updated_at TEXT DEFAULT (datetime('now')),
-    UNIQUE(teacher_id, topic_id)
+    updated_at TEXT DEFAULT (datetime('now'))
   );
   CREATE TABLE IF NOT EXISTS badges (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -428,14 +427,14 @@ app.post('/api/ai-instructions', auth, (req, res) => {
 
   try {
     const result = db.prepare(`
-      INSERT OR REPLACE INTO ai_instructions 
+      INSERT INTO ai_instructions 
       (teacher_id, topic_id, instructions, is_global, updated_at) 
       VALUES (?, ?, ?, ?, datetime('now'))
     `).run(
       req.user.id,
-      topicId || null,
+      isGlobal ? null : (topicId || null),
       instructions.trim(),
-      isGlobal || false
+      isGlobal ? 1 : 0
     );
 
     res.json({ 
