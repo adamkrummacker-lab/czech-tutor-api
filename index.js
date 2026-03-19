@@ -108,6 +108,13 @@ db.exec(`
     content TEXT NOT NULL,
     created_at TEXT DEFAULT (datetime('now'))
   );
+  CREATE TABLE IF NOT EXISTS lecture_assignments (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    teacher_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
+    lecture_id INTEGER REFERENCES lectures(id) ON DELETE CASCADE,
+    student_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
+    created_at TEXT DEFAULT (datetime('now'))
+  );
   CREATE TABLE IF NOT EXISTS badges (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     user_id INTEGER REFERENCES users(id),
@@ -1019,6 +1026,76 @@ app.delete('/api/lectures/:id', auth, (req, res) => {
   } catch (err) {
     console.error('Lecture deletion error:', err);
     res.status(500).json({ error: 'Chyba při mazání přednášky' });
+  }
+});
+
+// --- LECTURE ASSIGNMENTS CRUD ---
+app.get('/api/lecture-assignments', auth, (req, res) => {
+  if (req.user.role !== 'teacher') return res.status(403).json({ error: 'Přístup zamítnut' });
+
+  const assignments = db.prepare(`
+    SELECT la.*, l.title as lecture_title, 
+           GROUP_CONCAT(u.name, ' (', u.username, ')') as students
+    FROM lecture_assignments la
+    JOIN lectures l ON l.id = la.lecture_id
+    JOIN users u ON u.id = la.student_id
+    WHERE la.teacher_id = ?
+    ORDER BY la.created_at DESC
+  `).all(req.user.id);
+  
+  res.json(assignments);
+});
+
+app.post('/api/lecture-assignments', auth, (req, res) => {
+  if (req.user.role !== 'teacher') return res.status(403).json({ error: 'Přístup zamítnut' });
+
+  const { lectureId, studentIds } = req.body;
+  
+  if (!lectureId || !studentIds || studentIds.length === 0) {
+    return res.status(400).json({ error: 'Přednáška a studenti jsou povinné' });
+  }
+
+  try {
+    // Delete existing assignments for this lecture
+    db.prepare('DELETE FROM lecture_assignments WHERE lecture_id = ?').run(lectureId);
+    
+    // Create new assignments
+    const result = db.prepare(`
+      INSERT INTO lecture_assignments (teacher_id, lecture_id, student_id, created_at)
+      VALUES (?, ?, ?, datetime('now'))
+    `).run(
+      req.user.id,
+      lectureId,
+      studentIds.map(id => [req.user.id, id])
+    );
+
+    res.json({ 
+      message: 'Studenti přiřazeni k přednášce',
+      assigned: studentIds.length
+    });
+  } catch (err) {
+    console.error('Assignment creation error:', err);
+    res.status(500).json({ error: 'Chyba při přiřazování studentů' });
+  }
+});
+
+app.delete('/api/lecture-assignments/:id', auth, (req, res) => {
+  if (req.user.role !== 'teacher') return res.status(403).json({ error: 'Přístup zamítnut' });
+
+  try {
+    const result = db.prepare(`
+      DELETE FROM lecture_assignments 
+      WHERE id = ? AND teacher_id = ?
+    `).run(req.params.id, req.user.id);
+
+    if (result.changes === 0) {
+      return res.status(404).json({ error: 'Přiřazení nenalezeno' });
+    }
+
+    res.json({ message: 'Přiřazení smazáno' });
+  } catch (err) {
+    console.error('Assignment deletion error:', err);
+    res.status(500).json({ error: 'Chyba při mazání přiřazení' });
   }
 });
 
