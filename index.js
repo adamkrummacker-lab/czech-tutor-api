@@ -591,6 +591,32 @@ app.post('/api/classes/leave', auth, (req, res) => {
   res.json({ ok: true });
 });
 
+app.post('/api/students/invite', auth, (req, res) => {
+  if (req.user.role !== 'teacher') return res.status(403).json({ error: 'Přístup zamítnut' });
+  const { name, classId } = req.body;
+  if (!name || !name.trim()) return res.status(400).json({ error: 'Jméno žáka je povinné' });
+
+  const cls = db.prepare('SELECT * FROM classes WHERE id = ? AND teacher_id = ?').get(classId, req.user.id);
+  if (!cls) return res.status(404).json({ error: 'Třída nenalezena' });
+
+  // Generate unique username
+  const baseName = name.trim().toLowerCase().replace(/[^a-z0-9]/g, '') || 'student';
+  let username = baseName;
+  let suffix = 1;
+  while (db.prepare('SELECT 1 FROM users WHERE username = ?').get(username)) {
+    username = `${baseName}${suffix}`;
+    suffix += 1;
+  }
+
+  const password = generatePassword(10);
+  const hash = bcrypt.hashSync(password, 10);
+
+  db.prepare('INSERT INTO users (username, password, role, name, class_id) VALUES (?, ?, ?, ?, ?)')
+    .run(username, hash, 'student', name.trim(), cls.id);
+
+  res.status(201).json({ username, password, classId: cls.id, className: cls.name });
+});
+
 // --- CHAT ---
 app.get('/api/chat/:topicId', auth, (req, res) => {
   const userId = req.user.id;
