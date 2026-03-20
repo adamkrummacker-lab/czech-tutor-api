@@ -402,7 +402,7 @@ app.post('/api/topics/:topicId/submit', auth, (req, res) => {
     res.json({ ok: true, submittedAt: new Date().toISOString(), xp: user.xp });
   } catch (err) {
     console.error('Submit work error', err);
-    res.status(500).json({ error: 'Chyba serveru při odevzdávání. Zkus to prosím později.' });
+    res.status(500).json({ error: err.message || 'Chyba serveru při odevzdávání. Zkus to prosím později.', stack: err.stack });
   }
 });
 
