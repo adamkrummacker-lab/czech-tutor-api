@@ -634,6 +634,20 @@ app.post('/api/classes/leave', auth, (req, res) => {
   res.json({ ok: true });
 });
 
+app.delete('/api/classes/:id', auth, (req, res) => {
+  if (req.user.role !== 'teacher') return res.status(403).json({ error: 'Přístup zamítnut' });
+  const classId = Number(req.params.id);
+  if (Number.isNaN(classId)) return res.status(400).json({ error: 'Neplatné ID třídy' });
+
+  const cls = db.prepare('SELECT * FROM classes WHERE id = ? AND teacher_id = ?').get(classId, req.user.id);
+  if (!cls) return res.status(404).json({ error: 'Třída nenalezena' });
+
+  db.prepare('UPDATE users SET class_id = NULL WHERE class_id = ?').run(classId);
+  db.prepare('DELETE FROM classes WHERE id = ? AND teacher_id = ?').run(classId, req.user.id);
+
+  res.json({ ok: true });
+});
+
 app.get('/api/version', (req, res) => {
   let commit = null
   try {
