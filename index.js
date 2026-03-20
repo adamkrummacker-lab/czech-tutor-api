@@ -379,16 +379,31 @@ app.post('/api/topics/:id/assign', auth, (req, res) => {
 
 // --- SUBMIT WORK ---
 app.post('/api/topics/:topicId/submit', auth, (req, res) => {
-  const topicId = Number(req.params.topicId);
-  const userId = req.user.id;
-  const assignment = db.prepare('SELECT * FROM topic_assignments WHERE topic_id = ? AND student_id = ?').get(topicId, userId);
-  if (!assignment) return res.status(404).json({ error: 'Přiřazení nenalezeno' });
-  if (assignment.submitted_at) return res.status(400).json({ error: 'Již odevzdáno' });
-  db.prepare('UPDATE topic_assignments SET submitted_at = datetime("now") WHERE topic_id = ? AND student_id = ?').run(topicId, userId);
-  db.prepare('UPDATE users SET xp = xp + 15 WHERE id = ?').run(userId);
-  checkAndAwardBadges(userId);
-  const user = db.prepare('SELECT xp FROM users WHERE id = ?').get(userId);
-  res.json({ ok: true, submittedAt: new Date().toISOString(), xp: user.xp });
+  try {
+    const topicId = Number(req.params.topicId);
+    if (Number.isNaN(topicId)) {
+      return res.status(400).json({ error: 'Neplatné ID tématu' });
+    }
+
+    const userId = req.user.id;
+    if (req.user.role !== 'student') {
+      return res.status(403).json({ error: 'Pouze studenti mohou odevzdávat' });
+    }
+
+    const assignment = db.prepare('SELECT * FROM topic_assignments WHERE topic_id = ? AND student_id = ?').get(topicId, userId);
+    if (!assignment) return res.status(404).json({ error: 'Přiřazení nenalezeno' });
+    if (assignment.submitted_at) return res.status(400).json({ error: 'Již odevzdáno' });
+
+    db.prepare('UPDATE topic_assignments SET submitted_at = datetime("now") WHERE topic_id = ? AND student_id = ?').run(topicId, userId);
+    db.prepare('UPDATE users SET xp = xp + 15 WHERE id = ?').run(userId);
+    checkAndAwardBadges(userId);
+
+    const user = db.prepare('SELECT xp FROM users WHERE id = ?').get(userId);
+    res.json({ ok: true, submittedAt: new Date().toISOString(), xp: user.xp });
+  } catch (err) {
+    console.error('Submit work error', err);
+    res.status(500).json({ error: 'Chyba serveru při odevzdávání. Zkus to prosím později.' });
+  }
 });
 
 // --- TOPIC TEMPLATES ---
