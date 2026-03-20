@@ -394,7 +394,7 @@ app.post('/api/topics/:topicId/submit', auth, (req, res) => {
     if (!assignment) return res.status(404).json({ error: 'Přiřazení nenalezeno' });
     if (assignment.submitted_at) return res.status(400).json({ error: 'Již odevzdáno' });
 
-    db.prepare('UPDATE topic_assignments SET submitted_at = datetime("now") WHERE topic_id = ? AND student_id = ?').run(topicId, userId);
+    db.prepare('UPDATE topic_assignments SET submitted_at = datetime(\'now\') WHERE topic_id = ? AND student_id = ?').run(topicId, userId);
     db.prepare('UPDATE users SET xp = xp + 15 WHERE id = ?').run(userId);
     checkAndAwardBadges(userId);
 
