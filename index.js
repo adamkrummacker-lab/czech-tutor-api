@@ -418,6 +418,15 @@ app.get('/api/daily-tip', auth, (req, res) => {
   res.json({ tip });
 });
 
+// --- GLOBAL ERROR HANDLING ---
+app.use((err, req, res, next) => {
+  console.error('Unhandled server error', err);
+  if (res.headersSent) {
+    return next(err);
+  }
+  res.status(500).json({ error: 'Internal server error (podrobnosti v logu)' });
+});
+
 // --- AI INSTRUCTIONS ---
 app.get('/api/ai-instructions', auth, (req, res) => {
   if (req.user.role !== 'teacher') return res.status(403).json({ error: 'Přístup zamítnut' });
