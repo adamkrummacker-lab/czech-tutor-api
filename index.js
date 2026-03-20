@@ -47,6 +47,17 @@ const db = new Database(path.join(__dirname, 'czech-tutor.db'));
 db.pragma('journal_mode = WAL');
 db.pragma('foreign_keys = ON');
 
+const clearDataOnStart = () => {
+  if (process.env.CLEAR_CLASSES === 'true') {
+    console.log('CLEAR_CLASSES enabled: vymazávám třídy a přiřazení...')
+    db.prepare('UPDATE users SET class_id = NULL').run()
+    db.prepare('DELETE FROM topic_assignments').run()
+    db.prepare('DELETE FROM classes').run()
+  }
+}
+
+clearDataOnStart()
+
 db.exec(`
   CREATE TABLE IF NOT EXISTS users (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
