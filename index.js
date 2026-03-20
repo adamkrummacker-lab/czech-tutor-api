@@ -639,8 +639,12 @@ app.delete('/api/classes/:id', auth, (req, res) => {
   const classId = Number(req.params.id);
   if (Number.isNaN(classId)) return res.status(400).json({ error: 'Neplatné ID třídy' });
 
+  console.log('DELETE /api/classes/:id', { classId, userId: req.user.id })
   const cls = db.prepare('SELECT * FROM classes WHERE id = ? AND teacher_id = ?').get(classId, req.user.id);
-  if (!cls) return res.status(404).json({ error: 'Třída nenalezena' });
+  if (!cls) {
+    console.warn('Class not found for delete', { classId, teacherId: req.user.id });
+    return res.status(404).json({ error: 'Třída nenalezena' });
+  }
 
   db.prepare('UPDATE users SET class_id = NULL WHERE class_id = ?').run(classId);
   db.prepare('DELETE FROM classes WHERE id = ? AND teacher_id = ?').run(classId, req.user.id);
