@@ -10,24 +10,19 @@ const { execSync } = require('child_process');
 
 const app = express();
 
-const corsOptions = {
-  origin: (origin, callback) => {
-    const allowed = ['https://czech-tutor-client.vercel.app', 'https://czech-tutor-api.onrender.com', 'http://localhost:5173', 'http://localhost:3000'];
-    if (!origin || allowed.includes(origin)) return callback(null, true);
-    callback(new Error('CORS policy: Origin not allowed'));
-  },
-  methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
+app.use(cors({
+  origin: true,
   credentials: true,
-};
-
-app.use(cors(corsOptions));
+  methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization'],
+}));
 app.use((req, res, next) => {
   res.header('Access-Control-Allow-Origin', '*');
   res.header('Access-Control-Allow-Methods', 'GET,POST,PUT,PATCH,DELETE,OPTIONS');
   res.header('Access-Control-Allow-Headers', 'Content-Type,Authorization');
   next();
 });
-app.options('*', cors(corsOptions));
+app.options('*', cors());
 app.use(express.json());
 
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
