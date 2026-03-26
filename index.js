@@ -22,7 +22,7 @@ app.use((req, res, next) => {
   res.header('Access-Control-Allow-Headers', 'Content-Type,Authorization');
   next();
 });
-app.options('*', cors());
+// app.options('*') nepracuje se starší dráhou path-to-regexp, křížově vynecháme a používáme globální CORS middleware
 app.use(express.json());
 
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
