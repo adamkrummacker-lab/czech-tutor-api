@@ -10,23 +10,41 @@ const { execSync } = require('child_process');
 
 const app = express();
 
+const allowedOrigins = (process.env.CORS_ORIGINS || '')
+  .split(',')
+  .map(o => o.trim())
+  .filter(Boolean);
+
 app.use(cors({
-  origin: true,
-  credentials: true,
+  origin: (origin, cb) => {
+    if (!origin) return cb(null, true);
+    if (allowedOrigins.length === 0) return cb(null, true);
+    return cb(null, allowedOrigins.includes(origin));
+  },
+  credentials: false,
   methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
   allowedHeaders: ['Content-Type', 'Authorization'],
 }));
-app.use((req, res, next) => {
-  res.header('Access-Control-Allow-Origin', '*');
-  res.header('Access-Control-Allow-Methods', 'GET,POST,PUT,PATCH,DELETE,OPTIONS');
-  res.header('Access-Control-Allow-Headers', 'Content-Type,Authorization');
-  next();
-});
 // app.options('*') nepracuje se starší dráhou path-to-regexp, křížově vynecháme a používáme globální CORS middleware
 app.use(express.json());
 
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 const JWT_SECRET = process.env.JWT_SECRET || 'czech-tutor-secret-key-2026';
+
+// Sequelize podpora (Postgres/SQLite) - step 1 (perzistence pro budoucí produkci)
+const { sequelize } = require('./db');
+
+sequelize.authenticate().then(() => {
+  console.log('Sequelize connection OK');
+}).catch(err => {
+  console.warn('Sequelize connection error:', err.message);
+});
+
+sequelize.sync({ alter: true }).then(() => {
+  console.log('Sequelize sync complete');
+}).catch(err => {
+  console.error('Sequelize sync failed:', err.message);
+});
 
 function generateJoinCode(length = 6) {
   const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
@@ -154,6 +172,15 @@ db.exec(`
     score INTEGER,
     grade TEXT,
     evaluation TEXT,
+    created_at TEXT DEFAULT (datetime('now'))
+  );
+  CREATE TABLE IF NOT EXISTS audit_logs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER REFERENCES users(id),
+    action TEXT NOT NULL,
+    target_type TEXT,
+    target_id INTEGER,
+    metadata TEXT,
     created_at TEXT DEFAULT (datetime('now'))
   );
 `);
@@ -296,7 +323,61 @@ function auth(req, res, next) {
   }
 }
 
+function requireTeacher(req, res, next) {
+  if (req.user.role !== 'teacher') {
+    return res.status(403).json({ error: 'Přístup zamítnut' });
+  }
+  next();
+}
+
+function requireStudent(req, res, next) {
+  if (req.user.role !== 'student') {
+    return res.status(403).json({ error: 'Přístup zamítnut' });
+  }
+  next();
+}
+
+function logAudit(userId, action, targetType = null, targetId = null, metadata = null) {
+  try {
+    db.prepare(
+      'INSERT INTO audit_logs (user_id, action, target_type, target_id, metadata) VALUES (?, ?, ?, ?, ?)'
+    ).run(userId, action, targetType, targetId, metadata ? JSON.stringify(metadata) : null);
+  } catch (err) {
+    console.warn('Audit log failed:', err.message);
+  }
+}
+
+function teacherOwnsTopic(teacherId, topicId) {
+  const row = db.prepare('SELECT id FROM topics WHERE id = ? AND created_by = ?').get(topicId, teacherId);
+  return !!row;
+}
+
+function teacherOwnsStudent(teacherId, studentId) {
+  const row = db.prepare(
+    `SELECT u.id
+     FROM users u
+     JOIN classes c ON c.id = u.class_id
+     WHERE u.id = ? AND c.teacher_id = ?`
+  ).get(studentId, teacherId);
+  return !!row;
+}
+
+function studentAssignedToTopic(studentId, topicId) {
+  const row = db.prepare(
+    'SELECT topic_id FROM topic_assignments WHERE topic_id = ? AND student_id = ?'
+  ).get(topicId, studentId);
+  return !!row;
+}
+
 // --- AUTH ROUTES ---
+app.get('/api/auth/login', (req, res) => {
+  res.status(405).json({ error: 'Use POST for /api/auth/login', method: 'POST' });
+});
+
+app.get('/api/auth/register', (req, res) => {
+  res.status(405).json({ error: 'Use POST for /api/auth/register', method: 'POST' });
+});
+
 app.post('/api/auth/login', (req, res) => {
   const { username, password } = req.body;
   const user = db.prepare('SELECT * FROM users WHERE username = ?').get(username);
@@ -354,7 +435,7 @@ app.put('/api/me/preferences', auth, (req, res) => {
 // --- TOPICS ---
 app.get('/api/topics', auth, (req, res) => {
   if (req.user.role === 'teacher') {
-    const topics = db.prepare('SELECT * FROM topics ORDER BY created_at DESC').all();
+    const topics = db.prepare('SELECT * FROM topics WHERE created_by = ? ORDER BY created_at DESC').all(req.user.id);
     for (const t of topics) {
       const assignments = db.prepare('SELECT student_id, submitted_at FROM topic_assignments WHERE topic_id = ?').all(t.id);
       t.assignedTo = assignments.map(r => r.student_id);
@@ -379,25 +460,44 @@ app.get('/api/topics', auth, (req, res) => {
 });
 
 app.post('/api/topics', auth, (req, res) => {
+  if (req.user.role !== 'teacher') return res.status(403).json({ error: 'Přístup zamítnut' });
   const { title, description, level, minMessages } = req.body;
   const result = db.prepare('INSERT INTO topics (title, description, level, min_messages, created_by) VALUES (?, ?, ?, ?, ?)').run(title, description || '', level || 'A2', minMessages || 10, req.user.id);
   const topic = db.prepare('SELECT * FROM topics WHERE id = ?').get(result.lastInsertRowid);
   topic.assignedTo = [];
+  logAudit(req.user.id, 'topic_create', 'topic', topic.id, { title: topic.title });
   res.status(201).json(topic);
 });
 
 app.delete('/api/topics/:id', auth, (req, res) => {
-  const result = db.prepare('DELETE FROM topics WHERE id = ?').run(req.params.id);
+  if (req.user.role !== 'teacher') return res.status(403).json({ error: 'Přístup zamítnut' });
+  if (!teacherOwnsTopic(req.user.id, req.params.id)) {
+    return res.status(403).json({ error: 'Nemáte přístup k tomuto tématu' });
+  }
+  const result = db.prepare('DELETE FROM topics WHERE id = ? AND created_by = ?').run(req.params.id, req.user.id);
   if (result.changes === 0) return res.status(404).json({ error: 'Téma nenalezeno' });
+  logAudit(req.user.id, 'topic_delete', 'topic', Number(req.params.id));
   res.json({ ok: true });
 });
 
 app.post('/api/topics/:id/assign', auth, (req, res) => {
+  if (req.user.role !== 'teacher') return res.status(403).json({ error: 'Přístup zamítnut' });
   const { studentId } = req.body;
+  if (!teacherOwnsTopic(req.user.id, req.params.id)) {
+    return res.status(403).json({ error: 'Nemáte přístup k tomuto tématu' });
+  }
+  if (!teacherOwnsStudent(req.user.id, studentId)) {
+    return res.status(403).json({ error: 'Student nepatří do vaší třídy' });
+  }
+  const student = db.prepare('SELECT role FROM users WHERE id = ?').get(studentId);
+  if (!student || student.role !== 'student') {
+    return res.status(400).json({ error: 'Neplatný student' });
+  }
   db.prepare('INSERT OR IGNORE INTO topic_assignments (topic_id, student_id) VALUES (?, ?)').run(req.params.id, studentId);
-  const topic = db.prepare('SELECT * FROM topics WHERE id = ?').get(req.params.id);
+  const topic = db.prepare('SELECT * FROM topics WHERE id = ? AND created_by = ?').get(req.params.id, req.user.id);
   if (!topic) return res.status(404).json({ error: 'Téma nenalezeno' });
   topic.assignedTo = db.prepare('SELECT student_id FROM topic_assignments WHERE topic_id = ?').all(topic.id).map(r => r.student_id);
+  logAudit(req.user.id, 'topic_assign', 'topic', topic.id, { studentId });
   res.json(topic);
 });
 
@@ -414,6 +514,9 @@ app.post('/api/topics/:topicId/submit', auth, (req, res) => {
       return res.status(403).json({ error: 'Pouze studenti mohou odevzdávat' });
     }
 
+    if (!studentAssignedToTopic(userId, topicId)) {
+      return res.status(403).json({ error: 'Nemáte přístup k tomuto tématu' });
+    }
     const assignment = db.prepare('SELECT * FROM topic_assignments WHERE topic_id = ? AND student_id = ?').get(topicId, userId);
     if (!assignment) return res.status(404).json({ error: 'Přiřazení nenalezeno' });
     if (assignment.submitted_at) return res.status(400).json({ error: 'Již odevzdáno' });
@@ -423,6 +526,7 @@ app.post('/api/topics/:topicId/submit', auth, (req, res) => {
     checkAndAwardBadges(userId);
 
     const user = db.prepare('SELECT xp FROM users WHERE id = ?').get(userId);
+    logAudit(userId, 'topic_submit', 'topic', topicId);
     res.json({ ok: true, submittedAt: new Date().toISOString(), xp: user.xp });
   } catch (err) {
     console.error('Submit work error', err);
@@ -621,6 +725,7 @@ app.post('/api/classes', auth, (req, res) => {
   if (!name || !name.trim()) return res.status(400).json({ error: 'Název třídy je povinný' });
   const joinCode = generateJoinCode();
   const result = db.prepare('INSERT INTO classes (name, teacher_id, join_code) VALUES (?, ?, ?)').run(name.trim(), req.user.id, joinCode);
+  logAudit(req.user.id, 'class_create', 'class', result.lastInsertRowid, { name: name.trim() });
   res.status(201).json({ id: result.lastInsertRowid, name: name.trim(), teacher_id: req.user.id, join_code: joinCode });
 });
 
@@ -631,12 +736,14 @@ app.post('/api/classes/join', auth, (req, res) => {
   const cls = db.prepare('SELECT * FROM classes WHERE join_code = ?').get(code.trim().toUpperCase());
   if (!cls) return res.status(404).json({ error: 'Třída nenalezena' });
   db.prepare('UPDATE users SET class_id = ? WHERE id = ?').run(cls.id, req.user.id);
+  logAudit(req.user.id, 'class_join', 'class', cls.id);
   res.json({ class: cls });
 });
 
 app.post('/api/classes/leave', auth, (req, res) => {
   if (req.user.role !== 'student') return res.status(403).json({ error: 'Přístup zamítnut' });
   db.prepare('UPDATE users SET class_id = NULL WHERE id = ?').run(req.user.id);
+  logAudit(req.user.id, 'class_leave', 'class', null);
   res.json({ ok: true });
 });
 
@@ -655,6 +762,7 @@ app.delete('/api/classes/:id', auth, (req, res) => {
   db.prepare('UPDATE users SET class_id = NULL WHERE class_id = ?').run(classId);
   db.prepare('DELETE FROM classes WHERE id = ? AND teacher_id = ?').run(classId, req.user.id);
 
+  logAudit(req.user.id, 'class_delete', 'class', classId);
   res.json({ ok: true });
 });
 
@@ -691,6 +799,7 @@ app.post('/api/students/invite', auth, (req, res) => {
   db.prepare('INSERT INTO users (username, password, role, name, class_id) VALUES (?, ?, ?, ?, ?)')
     .run(username, hash, 'student', name.trim(), cls.id);
 
+  logAudit(req.user.id, 'student_invite', 'class', cls.id, { name: name.trim(), username });
   res.status(201).json({ username, password, classId: cls.id, className: cls.name });
 });
 
@@ -698,6 +807,12 @@ app.post('/api/students/invite', auth, (req, res) => {
 app.get('/api/chat/:topicId', auth, (req, res) => {
   const userId = req.user.id;
   const topicId = Number(req.params.topicId);
+  if (req.user.role !== 'student') {
+    return res.status(403).json({ error: 'Přístup zamítnut' });
+  }
+  if (!studentAssignedToTopic(userId, topicId)) {
+    return res.status(403).json({ error: 'Nemáte přístup k tomuto tématu' });
+  }
 
   let msgs = db.prepare('SELECT id, role, content, timestamp FROM messages WHERE user_id = ? AND topic_id = ? ORDER BY id').all(userId, topicId);
 
@@ -730,7 +845,19 @@ app.get('/api/chat/:topicId', auth, (req, res) => {
 });
 
 app.get('/api/chat/:topicId/student/:studentId', auth, (req, res) => {
-  const msgs = db.prepare('SELECT role, content, timestamp FROM messages WHERE user_id = ? AND topic_id = ? ORDER BY id').all(req.params.studentId, req.params.topicId);
+  if (req.user.role !== 'teacher') return res.status(403).json({ error: 'Přístup zamítnut' });
+  const topicId = Number(req.params.topicId);
+  const studentId = Number(req.params.studentId);
+  if (!teacherOwnsStudent(req.user.id, studentId)) {
+    return res.status(403).json({ error: 'Student nepatří do vaší třídy' });
+  }
+  if (!teacherOwnsTopic(req.user.id, topicId)) {
+    return res.status(403).json({ error: 'Nemáte přístup k tomuto tématu' });
+  }
+  if (!studentAssignedToTopic(studentId, topicId)) {
+    return res.status(403).json({ error: 'Téma není tomuto studentovi přiřazeno' });
+  }
+  const msgs = db.prepare('SELECT role, content, timestamp FROM messages WHERE user_id = ? AND topic_id = ? ORDER BY id').all(studentId, topicId);
   res.json(msgs);
 });
 
@@ -739,6 +866,15 @@ app.post('/api/chat/:topicId/messages/:messageId/reactions', auth, (req, res) =>
   const { emoji } = req.body;
   const messageId = Number(req.params.messageId);
   if (!emoji) return res.status(400).json({ error: 'Chybí emoji' });
+  if (req.user.role !== 'student') return res.status(403).json({ error: 'Přístup zamítnut' });
+  const topicId = Number(req.params.topicId);
+  if (!studentAssignedToTopic(userId, topicId)) {
+    return res.status(403).json({ error: 'Nemáte přístup k tomuto tématu' });
+  }
+  const msg = db.prepare('SELECT id, user_id, topic_id FROM messages WHERE id = ?').get(messageId);
+  if (!msg || msg.user_id !== userId || msg.topic_id !== topicId) {
+    return res.status(403).json({ error: 'Nemáte přístup k této zprávě' });
+  }
 
   // Toggle reaction (add / remove)
   const existing = db.prepare('SELECT id FROM message_reactions WHERE message_id = ? AND user_id = ? AND emoji = ?').get(messageId, userId, emoji);
@@ -758,6 +894,15 @@ app.post('/api/chat/:topicId/messages/:messageId/reactions', auth, (req, res) =>
 app.get('/api/chat/:topicId/messages/:messageId/reactions', auth, (req, res) => {
   const userId = req.user.id;
   const messageId = Number(req.params.messageId);
+  const topicId = Number(req.params.topicId);
+  if (req.user.role !== 'student') return res.status(403).json({ error: 'Přístup zamítnut' });
+  if (!studentAssignedToTopic(userId, topicId)) {
+    return res.status(403).json({ error: 'Nemáte přístup k tomuto tématu' });
+  }
+  const msg = db.prepare('SELECT id, user_id, topic_id FROM messages WHERE id = ?').get(messageId);
+  if (!msg || msg.user_id !== userId || msg.topic_id !== topicId) {
+    return res.status(403).json({ error: 'Nemáte přístup k této zprávě' });
+  }
   const reactions = db.prepare(
     'SELECT emoji, COUNT(*) as count, SUM(CASE WHEN user_id = ? THEN 1 ELSE 0 END) as me FROM message_reactions WHERE message_id = ? GROUP BY emoji'
   ).all(userId, messageId);
@@ -768,6 +913,12 @@ app.post('/api/chat/:topicId', auth, async (req, res) => {
   const { message } = req.body;
   const userId = req.user.id;
   const topicId = Number(req.params.topicId);
+  if (req.user.role !== 'student') {
+    return res.status(403).json({ error: 'Přístup zamítnut' });
+  }
+  if (!studentAssignedToTopic(userId, topicId)) {
+    return res.status(403).json({ error: 'Nemáte přístup k tomuto tématu' });
+  }
   const topic = db.prepare('SELECT * FROM topics WHERE id = ?').get(topicId);
   if (!topic) return res.status(404).json({ error: 'Téma nenalezeno' });
 
@@ -864,6 +1015,12 @@ Pravidla:
 app.post('/api/chat/:topicId/retry', auth, async (req, res) => {
   const userId = req.user.id;
   const topicId = Number(req.params.topicId);
+  if (req.user.role !== 'student') {
+    return res.status(403).json({ error: 'Přístup zamítnut' });
+  }
+  if (!studentAssignedToTopic(userId, topicId)) {
+    return res.status(403).json({ error: 'Nemáte přístup k tomuto tématu' });
+  }
   const topic = db.prepare('SELECT * FROM topics WHERE id = ?').get(topicId);
   if (!topic) return res.status(404).json({ error: 'Téma nenalezeno' });
 
@@ -939,8 +1096,28 @@ Pravidla:
 
 // --- CONVERSATION EVALUATION ---
 app.post('/api/chat/:topicId/evaluate', auth, async (req, res) => {
-  const userId = req.body.studentId || req.user.id;
-  const topicId = req.params.topicId;
+  const topicId = Number(req.params.topicId);
+  let userId = req.user.id;
+  if (req.user.role === 'teacher') {
+    if (!req.body.studentId) {
+      return res.status(400).json({ error: 'Chybí studentId' });
+    }
+    const studentId = Number(req.body.studentId);
+    if (!teacherOwnsStudent(req.user.id, studentId)) {
+      return res.status(403).json({ error: 'Student nepatří do vaší třídy' });
+    }
+    if (!teacherOwnsTopic(req.user.id, topicId)) {
+      return res.status(403).json({ error: 'Nemáte přístup k tomuto tématu' });
+    }
+    if (!studentAssignedToTopic(studentId, topicId)) {
+      return res.status(403).json({ error: 'Téma není tomuto studentovi přiřazeno' });
+    }
+    userId = studentId;
+  } else {
+    if (!studentAssignedToTopic(userId, topicId)) {
+      return res.status(403).json({ error: 'Nemáte přístup k tomuto tématu' });
+    }
+  }
   const topic = db.prepare('SELECT * FROM topics WHERE id = ?').get(topicId);
   const history = db.prepare('SELECT role, content FROM messages WHERE user_id = ? AND topic_id = ? ORDER BY id').all(userId, topicId);
 
@@ -993,6 +1170,7 @@ Buď co nejkonkrétnější a laskavý. Odpověď ulož jako čistý JSON (žád
     // Award bonus XP for completing evaluation
     db.prepare('UPDATE users SET xp = xp + 20 WHERE id = ?').run(userId);
 
+    logAudit(req.user.id, 'chat_evaluate', 'topic', topicId, { studentId: userId });
     res.json({ evaluation: evaluationText, score, grade });
   } catch (err) {
     console.error('Evaluation error:', err.message);
@@ -1035,7 +1213,12 @@ app.get('/api/gamification', auth, (req, res) => {
 app.get('/api/stats', auth, (req, res) => {
   if (req.user.role !== 'teacher') return res.status(403).json({ error: 'Přístup odepřen' });
 
-  const students = db.prepare("SELECT id, name, username, xp, streak FROM users WHERE role = 'student'").all();
+  const students = db.prepare(
+    `SELECT u.id, u.name, u.username, u.xp, u.streak
+     FROM users u
+     JOIN classes c ON c.id = u.class_id
+     WHERE u.role = 'student' AND c.teacher_id = ?`
+  ).all(req.user.id);
   const stats = students.map(s => {
     const msgCount = db.prepare("SELECT COUNT(*) as cnt FROM messages WHERE user_id = ? AND role = 'user'").get(s.id).cnt;
     const aiMsgCount = db.prepare("SELECT COUNT(*) as cnt FROM messages WHERE user_id = ? AND role = 'assistant'").get(s.id).cnt;
@@ -1050,7 +1233,22 @@ app.get('/api/stats', auth, (req, res) => {
 // --- CHAT EVALUATION ---
 app.get('/api/chat/:topicId/evaluation', auth, (req, res) => {
   const topicId = Number(req.params.topicId);
-  const studentId = req.query.studentId ? Number(req.query.studentId) : req.user.id;
+  let studentId = req.query.studentId ? Number(req.query.studentId) : req.user.id;
+  if (req.user.role === 'teacher') {
+    if (!teacherOwnsStudent(req.user.id, studentId)) {
+      return res.status(403).json({ error: 'Student nepatří do vaší třídy' });
+    }
+    if (!teacherOwnsTopic(req.user.id, topicId)) {
+      return res.status(403).json({ error: 'Nemáte přístup k tomuto tématu' });
+    }
+  } else {
+    if (studentId !== req.user.id) {
+      return res.status(403).json({ error: 'Přístup zamítnut' });
+    }
+    if (!studentAssignedToTopic(studentId, topicId)) {
+      return res.status(403).json({ error: 'Nemáte přístup k tomuto tématu' });
+    }
+  }
   const evaluation = db
     .prepare('SELECT * FROM evaluations WHERE topic_id = ? AND student_id = ? ORDER BY id DESC LIMIT 1')
     .get(topicId, studentId);
@@ -1102,6 +1300,7 @@ app.post('/api/lectures', auth, (req, res) => {
       content.trim()
     );
 
+    logAudit(req.user.id, 'lecture_create', 'lecture', result.lastInsertRowid, { title: title.trim() });
     res.json({ 
       id: result.lastInsertRowid,
       message: 'Přednáška vytvořena' 
@@ -1125,6 +1324,7 @@ app.delete('/api/lectures/:id', auth, (req, res) => {
       return res.status(404).json({ error: 'Přednáška nenalezena' });
     }
 
+    logAudit(req.user.id, 'lecture_delete', 'lecture', Number(req.params.id));
     res.json({ message: 'Přednáška smazána' });
   } catch (err) {
     console.error('Lecture deletion error:', err);
@@ -1159,6 +1359,15 @@ app.post('/api/lecture-assignments', auth, (req, res) => {
   }
 
   try {
+    const lecture = db.prepare('SELECT id FROM lectures WHERE id = ? AND teacher_id = ?').get(lectureId, req.user.id);
+    if (!lecture) {
+      return res.status(404).json({ error: 'Přednáška nenalezena' });
+    }
+    for (const studentId of studentIds) {
+      if (!teacherOwnsStudent(req.user.id, studentId)) {
+        return res.status(403).json({ error: 'Student nepatří do vaší třídy' });
+      }
+    }
     // Delete existing assignments for this lecture
     db.prepare('DELETE FROM lecture_assignments WHERE lecture_id = ?').run(lectureId);
     
@@ -1172,6 +1381,7 @@ app.post('/api/lecture-assignments', auth, (req, res) => {
       stmt.run(req.user.id, lectureId, studentId);
     });
 
+    logAudit(req.user.id, 'lecture_assign', 'lecture', lectureId, { studentIds });
     res.json({ 
       message: 'Studenti přiřazeni k přednášce',
       assigned: studentIds.length
@@ -1326,10 +1536,26 @@ app.get('/api/me/evaluations', auth, (req, res) => {
 
 // --- CHAT EXPORT ---
 app.get('/api/chat/:topicId/export', auth, (req, res) => {
-  const studentId = req.query.studentId || req.user.id;
-  const topic = db.prepare('SELECT * FROM topics WHERE id = ?').get(req.params.topicId);
+  const topicId = Number(req.params.topicId);
+  const studentId = req.query.studentId ? Number(req.query.studentId) : req.user.id;
+  if (req.user.role === 'teacher') {
+    if (!teacherOwnsStudent(req.user.id, studentId)) {
+      return res.status(403).json({ error: 'Student nepatří do vaší třídy' });
+    }
+    if (!teacherOwnsTopic(req.user.id, topicId)) {
+      return res.status(403).json({ error: 'Nemáte přístup k tomuto tématu' });
+    }
+  } else {
+    if (studentId !== req.user.id) {
+      return res.status(403).json({ error: 'Přístup zamítnut' });
+    }
+    if (!studentAssignedToTopic(studentId, topicId)) {
+      return res.status(403).json({ error: 'Nemáte přístup k tomuto tématu' });
+    }
+  }
+  const topic = db.prepare('SELECT * FROM topics WHERE id = ?').get(topicId);
   if (!topic) return res.status(404).json({ error: 'Téma nenalezeno' });
-  const msgs = db.prepare('SELECT role, content, timestamp FROM messages WHERE user_id = ? AND topic_id = ? ORDER BY id').all(studentId, req.params.topicId);
+  const msgs = db.prepare('SELECT role, content, timestamp FROM messages WHERE user_id = ? AND topic_id = ? ORDER BY id').all(studentId, topicId);
   const student = db.prepare('SELECT name FROM users WHERE id = ?').get(studentId);
 
   let text = `Czech Tutor - Export konverzace\n`;
@@ -1350,6 +1576,7 @@ app.get('/api/chat/:topicId/export', auth, (req, res) => {
 
   res.setHeader('Content-Type', 'text/plain; charset=utf-8');
   res.setHeader('Content-Disposition', `attachment; filename="chat-${topic.title.replace(/\s+/g, '-')}.txt"`);
+  logAudit(req.user.id, 'chat_export', 'topic', topicId, { studentId });
   res.send(text);
 });
 
