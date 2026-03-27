@@ -509,6 +509,30 @@ app.post('/api/topics/:id/assign', auth, (req, res) => {
   res.json(topic);
 });
 
+app.post('/api/topics/:id/unassign-class', auth, (req, res) => {
+  if (req.user.role !== 'teacher') return res.status(403).json({ error: 'Přístup zamítnut' });
+  const { classId } = req.body;
+  const topicId = Number(req.params.id);
+  const parsedClassId = Number(classId);
+  if (Number.isNaN(topicId) || Number.isNaN(parsedClassId)) {
+    return res.status(400).json({ error: 'Neplatné ID' });
+  }
+  if (!teacherOwnsTopic(req.user.id, topicId)) {
+    return res.status(403).json({ error: 'Nemáte přístup k tomuto tématu' });
+  }
+  const cls = db.prepare('SELECT id FROM classes WHERE id = ? AND teacher_id = ?').get(parsedClassId, req.user.id);
+  if (!cls) return res.status(404).json({ error: 'Třída nenalezena' });
+
+  const result = db.prepare(`
+    DELETE FROM topic_assignments
+    WHERE topic_id = ?
+      AND student_id IN (SELECT id FROM users WHERE class_id = ? AND role = 'student')
+  `).run(topicId, parsedClassId);
+
+  logAudit(req.user.id, 'topic_unassign_class', 'topic', topicId, { classId: parsedClassId, removed: result.changes });
+  res.json({ ok: true, removed: result.changes });
+});
+
 // --- SUBMIT WORK ---
 app.post('/api/topics/:topicId/submit', auth, (req, res) => {
   try {
