@@ -1338,6 +1338,35 @@ app.post('/api/feedback', auth, (req, res) => {
   res.status(201).json({ ok: true });
 });
 
+app.get('/api/feedback', auth, (req, res) => {
+  if (req.user.role !== 'teacher') return res.status(403).json({ error: 'Přístup zamítnut' });
+  const rows = db.prepare(`
+    SELECT f.id, f.topic_id, f.rating, f.text, f.created_at,
+           t.title AS topic_title,
+           u.id AS student_id, u.name AS student_name
+    FROM feedback f
+    JOIN users u ON u.id = f.student_id
+    JOIN classes c ON c.id = u.class_id
+    LEFT JOIN topics t ON t.id = f.topic_id
+    WHERE c.teacher_id = ?
+    ORDER BY f.created_at DESC
+  `).all(req.user.id);
+
+  const avgRow = db.prepare(`
+    SELECT AVG(f.rating) as avg_rating, COUNT(*) as total
+    FROM feedback f
+    JOIN users u ON u.id = f.student_id
+    JOIN classes c ON c.id = u.class_id
+    WHERE c.teacher_id = ?
+  `).get(req.user.id);
+
+  res.json({
+    average: avgRow?.avg_rating ? Number(avgRow.avg_rating.toFixed(2)) : null,
+    total: avgRow?.total || 0,
+    items: rows,
+  });
+});
+
 // --- LECTURES CRUD ---
 app.get('/api/lectures', auth, (req, res) => {
   if (req.user.role !== 'teacher') return res.status(403).json({ error: 'Přístup zamítnut' });
