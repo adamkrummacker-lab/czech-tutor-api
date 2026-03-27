@@ -1341,6 +1341,8 @@ Udělej hodnocení v tomto formátu (česky):
 - evaluation: přátelské shrnutí, co bylo nejlepší a co je dobré trénovat dál (1-2 odstavce)
 - strengths: silné stránky
 - improvements: oblasti ke zlepšení (doporučení)
+- vocabulary: seznam max 5 nejdůležitějších slovíček z lekce
+  - každé slovíčko má: word (česky), translation (volitelný překlad), context_sentence (volitelná krátká věta)
 
 Buď co nejkonkrétnější a laskavý. Odpověď ulož jako čistý JSON (žádný jiný text).`;
 
@@ -1355,7 +1357,7 @@ Buď co nejkonkrétnější a laskavý. Odpověď ulož jako čistý JSON (žád
     try {
       parsed = JSON.parse(raw);
     } catch {
-      const match = raw.match(/\{[\s\S]*\}/);
+      const match = raw.match(/\[[\s\S]*\]|\{[\s\S]*\}/);
       if (match) {
         try {
           parsed = JSON.parse(match[0]);
@@ -1368,6 +1370,7 @@ Buď co nejkonkrétnější a laskavý. Odpověď ulož jako čistý JSON (žád
     const score = parsed?.score != null ? Number(parsed.score) : null;
     const grade = parsed?.grade || null;
     const evaluationText = parsed?.evaluation || raw;
+    const vocabItems = Array.isArray(parsed?.vocabulary) ? parsed.vocabulary : [];
 
     // Store evaluation record
     db.prepare(
@@ -1377,8 +1380,23 @@ Buď co nejkonkrétnější a laskavý. Odpověď ulož jako čistý JSON (žád
     // Award bonus XP for completing evaluation
     db.prepare('UPDATE users SET xp = xp + 20 WHERE id = ?').run(userId);
 
+    // Save vocabulary (max 5, skip duplicates)
+    const savedVocabulary = [];
+    for (const item of vocabItems.slice(0, 5)) {
+      const word = String(item?.word || '').trim();
+      if (!word) continue;
+      const exists = db.prepare('SELECT 1 FROM vocabulary WHERE user_id = ? AND lower(word) = lower(?)').get(userId, word);
+      if (exists) continue;
+      const translation = item?.translation ? String(item.translation).trim() : '';
+      const context = item?.context_sentence ? String(item.context_sentence).trim() : '';
+      const result = db.prepare(
+        'INSERT INTO vocabulary (user_id, word, translation, context_sentence) VALUES (?, ?, ?, ?)'
+      ).run(userId, word, translation, context);
+      savedVocabulary.push({ id: result.lastInsertRowid, word, translation, context_sentence: context });
+    }
+
     logAudit(req.user.id, 'chat_evaluate', 'topic', topicId, { studentId: userId });
-    res.json({ evaluation: evaluationText, score, grade });
+    res.json({ evaluation: evaluationText, score, grade, vocabularyAdded: savedVocabulary });
   } catch (err) {
     console.error('Evaluation error:', err.message);
     res.status(500).json({ error: 'Chyba při hodnocení: ' + err.message });
