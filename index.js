@@ -813,7 +813,7 @@ app.get('/api/chat/:topicId', auth, (req, res) => {
   if (!studentAssignedToTopic(userId, topicId)) {
     return res.status(403).json({ error: 'Nemáte přístup k tomuto tématu' });
   }
-  const topic = db.prepare('SELECT title, description FROM topics WHERE id = ?').get(topicId);
+  const topic = db.prepare('SELECT title, description, level FROM topics WHERE id = ?').get(topicId);
   if (!topic) return res.status(404).json({ error: 'Téma nenalezeno' });
 
   let msgs = db.prepare('SELECT id, role, content, timestamp FROM messages WHERE user_id = ? AND topic_id = ? ORDER BY id').all(userId, topicId);
@@ -821,7 +821,9 @@ app.get('/api/chat/:topicId', auth, (req, res) => {
   // Pokud je konverzace prázdná, vytvoř úvodní zprávu od Káma (lektor) a ulož ji
   if (msgs.length === 0) {
     const topicLine = topic.description ? `Téma: "${topic.title}" (${topic.description}).` : `Téma: "${topic.title}".`;
-    const intro = `Ahoj! Jsem Kámo, tvůj česky mluvící lektor. ${topicLine} Začni prosím tím, že napíšeš 1–2 věty k tématu. Prosím odpovídej CELÝMI větami.`;
+    const intro = topic.level === 'A1'
+      ? `Ahoj! Jsem Kámo, tvůj lektor. ${topicLine} Napiš jednu krátkou větu k tématu. Např.: "Téma je ${topic.title}." 🙂`
+      : `Ahoj! Jsem Kámo, tvůj česky mluvící lektor. ${topicLine} Začni prosím tím, že napíšeš 1–2 věty k tématu. Prosím odpovídej CELÝMI větami.`;
     db.prepare('INSERT INTO messages (user_id, topic_id, role, content) VALUES (?, ?, ?, ?)').run(userId, topicId, 'assistant', intro);
     msgs = db.prepare('SELECT id, role, content, timestamp FROM messages WHERE user_id = ? AND topic_id = ? ORDER BY id').all(userId, topicId);
   }
@@ -969,11 +971,16 @@ app.post('/api/chat/:topicId', auth, async (req, res) => {
     C1: 'Používej bohatý slovník, složité větné konstrukce a idiomy; pokládej otevřené otázky a diskutuj nuance.'
   };
 
+  const a1ExtraRules = topic.level === 'A1'
+    ? '\nPravidla pro A1:\n- Ptej se vždy jen na 1 věc\n- Piš 1–2 krátké věty (max. 6 slov)\n- Přidej 2 krátké vzorové odpovědi v závorkách\n- Můžeš přidat 1 emoji na konec otázky'
+    : '';
+
   const systemPrompt = `Jsi přátelský lektor českého jazyka. Tvé jméno je Kámo. Vedeš konverzaci se studentem na téma: "${topic.title}" (${topic.description}).
 Úroveň studenta: ${topic.level} (${levelDesc[topic.level] || 'mírně pokročilý'}).
 Styl odpovědí: ${levelGuidelines[topic.level] || levelGuidelines.A2}
 Student odeslal ${userMsgCount} z ${minMessages} zpráv. ${remaining <= 3 && remaining > 0 ? 'Konverzace se blíží ke konci!' : ''}
 ${aiInstructions ? `\nDodatečné instrukce od učitele:\n${aiInstructions}` : ''}
+${a1ExtraRules}
 
 Pravidla:
 - Komunikuj POUZE česky
@@ -1065,11 +1072,16 @@ app.post('/api/chat/:topicId/retry', auth, async (req, res) => {
     C1: 'Používej bohatý slovník, složité větné konstrukce a idiomy; pokládej otevřené otázky a diskutuj nuance.'
   };
 
+  const a1ExtraRules = topic.level === 'A1'
+    ? '\nPravidla pro A1:\n- Ptej se vždy jen na 1 věc\n- Piš 1–2 krátké věty (max. 6 slov)\n- Přidej 2 krátké vzorové odpovědi v závorkách\n- Můžeš přidat 1 emoji na konec otázky'
+    : '';
+
   const systemPrompt = `Jsi přátelský lektor českého jazyka. Tvé jméno je Kámo. Vedeš konverzaci se studentem na téma: "${topic.title}" (${topic.description}).
 Úroveň studenta: ${topic.level} (${levelDesc[topic.level] || 'mírně pokročilý'}).
 Styl odpovědí: ${levelGuidelines[topic.level] || levelGuidelines.A2}
 Student odeslal ${userMsgCount} z ${minMessages} zpráv. ${remaining <= 3 && remaining > 0 ? 'Konverzace se blíží ke konci!' : ''}
 ${aiInstructions ? `\nDodatečné instrukce od učitele:\n${aiInstructions}` : ''}
+${a1ExtraRules}
 
 Pravidla:
 - Komunikuj POUZE česky
