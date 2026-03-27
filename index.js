@@ -813,12 +813,15 @@ app.get('/api/chat/:topicId', auth, (req, res) => {
   if (!studentAssignedToTopic(userId, topicId)) {
     return res.status(403).json({ error: 'Nemáte přístup k tomuto tématu' });
   }
+  const topic = db.prepare('SELECT title, description FROM topics WHERE id = ?').get(topicId);
+  if (!topic) return res.status(404).json({ error: 'Téma nenalezeno' });
 
   let msgs = db.prepare('SELECT id, role, content, timestamp FROM messages WHERE user_id = ? AND topic_id = ? ORDER BY id').all(userId, topicId);
 
   // Pokud je konverzace prázdná, vytvoř úvodní zprávu od Káma (lektor) a ulož ji
   if (msgs.length === 0) {
-    const intro = `Ahoj! Jsem Kámo, tvůj česky mluvící lektor. Budu se ptát a pomáhat ti zlepšit češtinu. Napiš mi, jak se máš, nebo co právě děláš. Prosím odpovídej CELÝMI větami.`;
+    const topicLine = topic.description ? `Téma: "${topic.title}" (${topic.description}).` : `Téma: "${topic.title}".`;
+    const intro = `Ahoj! Jsem Kámo, tvůj česky mluvící lektor. ${topicLine} Začni prosím tím, že napíšeš 1–2 věty k tématu. Prosím odpovídej CELÝMI větami.`;
     db.prepare('INSERT INTO messages (user_id, topic_id, role, content) VALUES (?, ?, ?, ?)').run(userId, topicId, 'assistant', intro);
     msgs = db.prepare('SELECT id, role, content, timestamp FROM messages WHERE user_id = ? AND topic_id = ? ORDER BY id').all(userId, topicId);
   }
