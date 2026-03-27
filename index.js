@@ -571,6 +571,69 @@ app.get('/api/templates', auth, (req, res) => {
   res.json(TOPIC_TEMPLATES);
 });
 
+app.post('/api/templates/generate', auth, async (req, res) => {
+  if (req.user.role !== 'teacher') {
+    return res.status(403).json({ error: 'Přístup zamítnut' });
+  }
+  const level = (req.body?.level || 'A2').toString().toUpperCase();
+  const allowedLevels = new Set(['A1', 'A2', 'B1', 'B2', 'C1']);
+  const safeLevel = allowedLevels.has(level) ? level : 'A2';
+  const requestedCount = Number(req.body?.count) || 1;
+  const count = Math.max(1, Math.min(10, requestedCount));
+
+  const prompt = `Vygeneruj ${count} nové konverzační téma pro výuku češtiny.
+Úroveň: ${safeLevel}.
+Požadavky:
+- Výstup jako čistý JSON
+- Pokud je více témat, vrať pole objektů
+- Klíče: title, description, level, minMessages
+- title: krátký název (max 6 slov)
+- description: 1-2 věty s konkrétní situací a otázkou
+- level: "${safeLevel}"
+- minMessages: číslo 8-12
+Neuváděj žádný další text.`;
+
+  try {
+    const completion = await openai.chat.completions.create({
+      model: 'gpt-4o-mini',
+      messages: [{ role: 'user', content: prompt }],
+      temperature: 0.7,
+    });
+    const raw = completion.choices[0].message.content || '';
+    let parsed = null;
+    try {
+      parsed = JSON.parse(raw);
+    } catch {
+      const match = raw.match(/\[[\s\S]*\]|\{[\s\S]*\}/);
+      if (match) {
+        try {
+          parsed = JSON.parse(match[0]);
+        } catch {
+          parsed = null;
+        }
+      }
+    }
+    const items = Array.isArray(parsed) ? parsed : (parsed ? [parsed] : []);
+    const cleaned = items
+      .map(item => ({
+        title: String(item?.title || '').trim(),
+        description: String(item?.description || '').trim(),
+        level: safeLevel,
+        minMessages: Number(item?.minMessages) || 10,
+      }))
+      .filter(item => item.title && item.description);
+
+    if (cleaned.length === 0) {
+      return res.status(500).json({ error: 'AI nevygenerovala platnou šablonu' });
+    }
+
+    res.json({ items: cleaned });
+  } catch (err) {
+    console.error('Template generation error:', err.message);
+    res.status(500).json({ error: 'Chyba při generování šablony' });
+  }
+});
+
 app.get('/api/daily-tip', auth, (req, res) => {
   const today = new Date();
   const idx = today.getDate() + today.getMonth() * 31;
