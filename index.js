@@ -854,6 +854,19 @@ app.get('/api/class-progress', auth, (req, res) => {
 
 // --- LEADERBOARD ---
 app.get('/api/leaderboard', auth, (req, res) => {
+  const toAchievementList = (preferencesText) => {
+    let prefs = {};
+    try {
+      prefs = preferencesText ? JSON.parse(preferencesText) : {};
+    } catch {
+      prefs = {};
+    }
+    const keys = Array.isArray(prefs.profileBadges) ? prefs.profileBadges : [];
+    return keys
+      .map(key => BADGE_DEFS[key] ? ({ key, name: BADGE_DEFS[key].name, emoji: BADGE_DEFS[key].emoji }) : null)
+      .filter(Boolean);
+  };
+
   if (req.user.role === 'teacher') {
     const classId = Number(req.query.classId);
     if (!classId || Number.isNaN(classId)) {
@@ -862,24 +875,40 @@ app.get('/api/leaderboard', auth, (req, res) => {
     const cls = db.prepare('SELECT * FROM classes WHERE id = ? AND teacher_id = ?').get(classId, req.user.id);
     if (!cls) return res.status(404).json({ error: 'Třída nenalezena' });
     const entries = db.prepare(
-      `SELECT id, name, username, xp, streak
+      `SELECT id, name, username, xp, streak, preferences
        FROM users
        WHERE class_id = ? AND role = 'student'
        ORDER BY xp DESC, streak DESC, name ASC`
     ).all(classId);
-    return res.json({ entries, class: { id: cls.id, name: cls.name } });
+    const mapped = entries.map(e => ({
+      id: e.id,
+      name: e.name,
+      username: e.username,
+      xp: e.xp,
+      streak: e.streak,
+      achievements: toAchievementList(e.preferences),
+    }));
+    return res.json({ entries: mapped, class: { id: cls.id, name: cls.name } });
   }
 
   const user = db.prepare('SELECT class_id FROM users WHERE id = ?').get(req.user.id);
   if (!user?.class_id) return res.json({ entries: [], class: null });
   const cls = db.prepare('SELECT id, name FROM classes WHERE id = ?').get(user.class_id);
   const entries = db.prepare(
-    `SELECT id, name, username, xp, streak
+    `SELECT id, name, username, xp, streak, preferences
      FROM users
      WHERE class_id = ? AND role = 'student'
      ORDER BY xp DESC, streak DESC, name ASC`
   ).all(user.class_id);
-  res.json({ entries, class: cls });
+  const mapped = entries.map(e => ({
+    id: e.id,
+    name: e.name,
+    username: e.username,
+    xp: e.xp,
+    streak: e.streak,
+    achievements: toAchievementList(e.preferences),
+  }));
+  res.json({ entries: mapped, class: cls });
 });
 
 app.post('/api/classes', auth, (req, res) => {
