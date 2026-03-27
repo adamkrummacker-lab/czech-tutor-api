@@ -751,6 +751,44 @@ app.get('/api/classes/me', auth, (req, res) => {
   res.json({ role: 'student', class: cls });
 });
 
+// --- CLASS PROGRESS ---
+app.get('/api/class-progress', auth, (req, res) => {
+  if (req.user.role !== 'teacher') return res.status(403).json({ error: 'Přístup zamítnut' });
+  const classes = db.prepare('SELECT id, name FROM classes WHERE teacher_id = ?').all(req.user.id);
+  const progress = classes.map(c => {
+    const studentCount = db.prepare(
+      `SELECT COUNT(*) as cnt FROM users WHERE class_id = ? AND role = 'student'`
+    ).get(c.id).cnt;
+    const assignedCount = db.prepare(
+      `SELECT COUNT(*) as cnt
+       FROM topic_assignments ta
+       JOIN users u ON u.id = ta.student_id
+       WHERE u.class_id = ?`
+    ).get(c.id).cnt;
+    const submittedCount = db.prepare(
+      `SELECT COUNT(*) as cnt
+       FROM topic_assignments ta
+       JOIN users u ON u.id = ta.student_id
+       WHERE u.class_id = ? AND ta.submitted_at IS NOT NULL`
+    ).get(c.id).cnt;
+    const topicsAssigned = db.prepare(
+      `SELECT COUNT(DISTINCT ta.topic_id) as cnt
+       FROM topic_assignments ta
+       JOIN users u ON u.id = ta.student_id
+       WHERE u.class_id = ?`
+    ).get(c.id).cnt;
+    return {
+      classId: c.id,
+      className: c.name,
+      studentCount,
+      assignedCount,
+      submittedCount,
+      topicsAssigned,
+    };
+  });
+  res.json(progress);
+});
+
 // --- LEADERBOARD ---
 app.get('/api/leaderboard', auth, (req, res) => {
   if (req.user.role === 'teacher') {
