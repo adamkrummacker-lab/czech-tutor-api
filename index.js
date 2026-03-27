@@ -174,6 +174,14 @@ db.exec(`
     evaluation TEXT,
     created_at TEXT DEFAULT (datetime('now'))
   );
+  CREATE TABLE IF NOT EXISTS feedback (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    topic_id INTEGER REFERENCES topics(id) ON DELETE CASCADE,
+    student_id INTEGER REFERENCES users(id),
+    rating INTEGER NOT NULL,
+    text TEXT,
+    created_at TEXT DEFAULT (datetime('now'))
+  );
   CREATE TABLE IF NOT EXISTS audit_logs (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     user_id INTEGER REFERENCES users(id),
@@ -1274,6 +1282,30 @@ app.get('/api/chat/:topicId/evaluation', auth, (req, res) => {
     grade: evaluation.grade,
     created_at: evaluation.created_at,
   });
+});
+
+// --- FEEDBACK ---
+app.post('/api/feedback', auth, (req, res) => {
+  if (req.user.role !== 'student') return res.status(403).json({ error: 'Přístup zamítnut' });
+  const { topicId, rating, text } = req.body;
+  const parsedTopicId = Number(topicId);
+  const parsedRating = Number(rating);
+
+  if (!parsedTopicId || Number.isNaN(parsedTopicId)) {
+    return res.status(400).json({ error: 'Neplatné ID tématu' });
+  }
+  if (Number.isNaN(parsedRating) || parsedRating < 1 || parsedRating > 5) {
+    return res.status(400).json({ error: 'Hodnocení musí být 1–5' });
+  }
+  if (!studentAssignedToTopic(req.user.id, parsedTopicId)) {
+    return res.status(403).json({ error: 'Nemáte přístup k tomuto tématu' });
+  }
+
+  db.prepare(
+    'INSERT INTO feedback (topic_id, student_id, rating, text) VALUES (?, ?, ?, ?)'
+  ).run(parsedTopicId, req.user.id, parsedRating, (text || '').toString().trim());
+
+  res.status(201).json({ ok: true });
 });
 
 // --- LECTURES CRUD ---
