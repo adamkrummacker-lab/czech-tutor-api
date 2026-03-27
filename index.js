@@ -727,6 +727,36 @@ app.get('/api/classes/me', auth, (req, res) => {
   res.json({ role: 'student', class: cls });
 });
 
+// --- LEADERBOARD ---
+app.get('/api/leaderboard', auth, (req, res) => {
+  if (req.user.role === 'teacher') {
+    const classId = Number(req.query.classId);
+    if (!classId || Number.isNaN(classId)) {
+      return res.status(400).json({ error: 'Chybí nebo je neplatné classId' });
+    }
+    const cls = db.prepare('SELECT * FROM classes WHERE id = ? AND teacher_id = ?').get(classId, req.user.id);
+    if (!cls) return res.status(404).json({ error: 'Třída nenalezena' });
+    const entries = db.prepare(
+      `SELECT id, name, username, xp, streak
+       FROM users
+       WHERE class_id = ? AND role = 'student'
+       ORDER BY xp DESC, streak DESC, name ASC`
+    ).all(classId);
+    return res.json({ entries, class: { id: cls.id, name: cls.name } });
+  }
+
+  const user = db.prepare('SELECT class_id FROM users WHERE id = ?').get(req.user.id);
+  if (!user?.class_id) return res.json({ entries: [], class: null });
+  const cls = db.prepare('SELECT id, name FROM classes WHERE id = ?').get(user.class_id);
+  const entries = db.prepare(
+    `SELECT id, name, username, xp, streak
+     FROM users
+     WHERE class_id = ? AND role = 'student'
+     ORDER BY xp DESC, streak DESC, name ASC`
+  ).all(user.class_id);
+  res.json({ entries, class: cls });
+});
+
 app.post('/api/classes', auth, (req, res) => {
   if (req.user.role !== 'teacher') return res.status(403).json({ error: 'Přístup zamítnut' });
   const { name } = req.body;
