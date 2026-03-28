@@ -110,6 +110,12 @@ db.exec(`
     submitted_at TEXT DEFAULT NULL,
     PRIMARY KEY (topic_id, student_id)
   );
+  CREATE TABLE IF NOT EXISTS class_topic_assignments (
+    class_id INTEGER REFERENCES classes(id) ON DELETE CASCADE,
+    topic_id INTEGER REFERENCES topics(id) ON DELETE CASCADE,
+    created_at TEXT DEFAULT (datetime('now')),
+    PRIMARY KEY (class_id, topic_id)
+  );
   CREATE TABLE IF NOT EXISTS messages (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     user_id INTEGER REFERENCES users(id),
@@ -517,6 +523,30 @@ app.post('/api/topics/:id/assign', auth, (req, res) => {
   res.json(topic);
 });
 
+app.post('/api/topics/:id/assign-class', auth, (req, res) => {
+  if (req.user.role !== 'teacher') return res.status(403).json({ error: 'Přístup zamítnut' });
+  const { classId } = req.body;
+  const topicId = Number(req.params.id);
+  const parsedClassId = Number(classId);
+  if (Number.isNaN(topicId) || Number.isNaN(parsedClassId)) {
+    return res.status(400).json({ error: 'Neplatné ID' });
+  }
+  if (!teacherOwnsTopic(req.user.id, topicId)) {
+    return res.status(403).json({ error: 'Nemáte přístup k tomuto tématu' });
+  }
+  const cls = db.prepare('SELECT id FROM classes WHERE id = ? AND teacher_id = ?').get(parsedClassId, req.user.id);
+  if (!cls) return res.status(404).json({ error: 'Třída nenalezena' });
+
+  db.prepare('INSERT OR IGNORE INTO class_topic_assignments (class_id, topic_id) VALUES (?, ?)').run(parsedClassId, topicId);
+  const students = db.prepare('SELECT id FROM users WHERE class_id = ? AND role = ?').all(parsedClassId, 'student');
+  for (const student of students) {
+    db.prepare('INSERT OR IGNORE INTO topic_assignments (topic_id, student_id) VALUES (?, ?)').run(topicId, student.id);
+  }
+
+  logAudit(req.user.id, 'topic_assign_class', 'topic', topicId, { classId: parsedClassId, assigned: students.length });
+  res.json({ ok: true, assigned: students.length });
+});
+
 app.post('/api/topics/:id/unassign-class', auth, (req, res) => {
   if (req.user.role !== 'teacher') return res.status(403).json({ error: 'Přístup zamítnut' });
   const { classId } = req.body;
@@ -536,6 +566,7 @@ app.post('/api/topics/:id/unassign-class', auth, (req, res) => {
     WHERE topic_id = ?
       AND student_id IN (SELECT id FROM users WHERE class_id = ? AND role = 'student')
   `).run(topicId, parsedClassId);
+  db.prepare('DELETE FROM class_topic_assignments WHERE topic_id = ? AND class_id = ?').run(topicId, parsedClassId);
 
   logAudit(req.user.id, 'topic_unassign_class', 'topic', topicId, { classId: parsedClassId, removed: result.changes });
   res.json({ ok: true, removed: result.changes });
@@ -936,6 +967,10 @@ app.post('/api/classes/join', auth, (req, res) => {
   const cls = db.prepare('SELECT * FROM classes WHERE join_code = ?').get(code.trim().toUpperCase());
   if (!cls) return res.status(404).json({ error: 'Třída nenalezena' });
   db.prepare('UPDATE users SET class_id = ? WHERE id = ?').run(cls.id, req.user.id);
+  const classTopics = db.prepare('SELECT topic_id FROM class_topic_assignments WHERE class_id = ?').all(cls.id);
+  for (const row of classTopics) {
+    db.prepare('INSERT OR IGNORE INTO topic_assignments (topic_id, student_id) VALUES (?, ?)').run(row.topic_id, req.user.id);
+  }
   logAudit(req.user.id, 'class_join', 'class', cls.id);
   res.json({ class: cls });
 });
@@ -1172,7 +1207,7 @@ app.post('/api/chat/:topicId', auth, async (req, res) => {
   };
 
   const a1ExtraRules = topic.level === 'A1'
-    ? '\nPravidla pro A1:\n- Ptej se vždy jen na 1 věc\n- Piš 1–2 krátké věty (max. 6 slov)\n- Přidej 2 krátké vzorové odpovědi v závorkách\n- Můžeš přidat 1 emoji na konec otázky'
+    ? '\nPravidla pro A1:\n- Ptej se vždy jen na 1 věc\n- Piš 1–2 krátké věty (max. 6 slov)\n- Nenabízej vzorové odpovědi, jen naznač téma\n- Můžeš přidat 1 emoji na konec otázky'
     : '';
 
   const systemPrompt = `Jsi přátelský lektor českého jazyka. Tvé jméno je Kámo. Vedeš konverzaci se studentem na téma: "${topic.title}" (${topic.description}).
@@ -1187,6 +1222,7 @@ Pravidla:
 - Buď přátelský a povzbudivý
 - Přizpůsob slovní zásobu úrovni studenta
 - Ptej se na detaily a udržuj konverzaci
+- Nepiš vzorové odpovědi, jen naznač, o čem může student mluvit
 - Pokud studentovi zbývá málo zpráv do konce, upozorni ho: "Blížíme se ke konci, zkus shrnout, co ses naučil/a."`;
 
   const messages = [
@@ -1273,7 +1309,7 @@ app.post('/api/chat/:topicId/retry', auth, async (req, res) => {
   };
 
   const a1ExtraRules = topic.level === 'A1'
-    ? '\nPravidla pro A1:\n- Ptej se vždy jen na 1 věc\n- Piš 1–2 krátké věty (max. 6 slov)\n- Přidej 2 krátké vzorové odpovědi v závorkách\n- Můžeš přidat 1 emoji na konec otázky'
+    ? '\nPravidla pro A1:\n- Ptej se vždy jen na 1 věc\n- Piš 1–2 krátké věty (max. 6 slov)\n- Nenabízej vzorové odpovědi, jen naznač téma\n- Můžeš přidat 1 emoji na konec otázky'
     : '';
 
   const systemPrompt = `Jsi přátelský lektor českého jazyka. Tvé jméno je Kámo. Vedeš konverzaci se studentem na téma: "${topic.title}" (${topic.description}).
@@ -1288,6 +1324,7 @@ Pravidla:
 - Buď přátelský a povzbudivý
 - Přizpůsob slovní zásobu úrovni studenta
 - Ptej se na detaily a udržuj konverzaci
+- Nepiš vzorové odpovědi, jen naznač, o čem může student mluvit
 - Pokud studentovi zbývá málo zpráv do konce, upozorni ho: "Blížíme se ke konci, zkus shrnout, co ses naučil/a."`;
 
   const messages = [
