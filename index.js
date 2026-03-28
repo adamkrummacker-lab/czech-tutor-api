@@ -202,6 +202,14 @@ if (!userColumns.includes('class_id')) {
   db.prepare("ALTER TABLE users ADD COLUMN class_id INTEGER").run();
 }
 
+const evaluationColumns = db.prepare("PRAGMA table_info(evaluations)").all().map(r => r.name);
+if (!evaluationColumns.includes('quiz_score')) {
+  db.prepare("ALTER TABLE evaluations ADD COLUMN quiz_score INTEGER").run();
+}
+if (!evaluationColumns.includes('quiz_total')) {
+  db.prepare("ALTER TABLE evaluations ADD COLUMN quiz_total INTEGER").run();
+}
+
 // Seed default users if empty
 const userCount = db.prepare('SELECT COUNT(*) as cnt FROM users').get().cnt;
 if (userCount === 0) {
@@ -1482,8 +1490,37 @@ app.get('/api/chat/:topicId/evaluation', auth, (req, res) => {
     evaluation: evaluation.evaluation,
     score: evaluation.score,
     grade: evaluation.grade,
+    quiz_score: evaluation.quiz_score,
+    quiz_total: evaluation.quiz_total,
     created_at: evaluation.created_at,
   });
+});
+
+app.post('/api/chat/:topicId/quiz-score', auth, (req, res) => {
+  if (req.user.role !== 'student') return res.status(403).json({ error: 'Přístup zamítnut' });
+  const topicId = Number(req.params.topicId);
+  const score = Number(req.body?.score);
+  const total = Number(req.body?.total);
+
+  if (!topicId || Number.isNaN(topicId)) {
+    return res.status(400).json({ error: 'Neplatné ID tématu' });
+  }
+  if (Number.isNaN(score) || Number.isNaN(total) || total <= 0 || score < 0 || score > total) {
+    return res.status(400).json({ error: 'Neplatné skóre' });
+  }
+  if (!studentAssignedToTopic(req.user.id, topicId)) {
+    return res.status(403).json({ error: 'Nemáte přístup k tomuto tématu' });
+  }
+
+  const evaluation = db
+    .prepare('SELECT id FROM evaluations WHERE topic_id = ? AND student_id = ? ORDER BY id DESC LIMIT 1')
+    .get(topicId, req.user.id);
+  if (!evaluation) return res.status(404).json({ error: 'Hodnocení nenalezeno' });
+
+  db.prepare('UPDATE evaluations SET quiz_score = ?, quiz_total = ? WHERE id = ?')
+    .run(score, total, evaluation.id);
+
+  res.json({ ok: true });
 });
 
 // --- FEEDBACK ---
@@ -1791,7 +1828,7 @@ app.get('/api/me/evaluations', auth, (req, res) => {
   if (req.user.role === 'teacher') {
     // Teachers see all evaluations for their students
     rows = db.prepare(`
-      SELECT e.id, e.topic_id, t.title as topic, e.score, e.grade, e.created_at, u.name as student_name, u.username as student_username
+      SELECT e.id, e.topic_id, t.title as topic, e.score, e.grade, e.quiz_score, e.quiz_total, e.created_at, u.name as student_name, u.username as student_username
       FROM evaluations e
       JOIN topics t ON t.id = e.topic_id
       JOIN users u ON u.id = e.student_id
@@ -1802,7 +1839,7 @@ app.get('/api/me/evaluations', auth, (req, res) => {
   } else {
     // Students see only their own evaluations
     rows = db.prepare(`
-      SELECT e.id, e.topic_id, t.title as topic, e.score, e.grade, e.created_at
+      SELECT e.id, e.topic_id, t.title as topic, e.score, e.grade, e.quiz_score, e.quiz_total, e.created_at
       FROM evaluations e
       JOIN topics t ON t.id = e.topic_id
       WHERE e.student_id = ?
