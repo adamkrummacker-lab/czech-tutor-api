@@ -722,6 +722,8 @@ app.post('/api/ai-instructions', auth, (req, res) => {
   if (req.user.role !== 'teacher') return res.status(403).json({ error: 'Přístup zamítnut' });
 
   const { topicId, instructions, isGlobal } = req.body;
+  const isGlobalFlag = isGlobal ? 1 : 0;
+  const normalizedTopicId = isGlobalFlag ? null : (topicId || null);
   
   if (!instructions || !instructions.trim()) {
     return res.status(400).json({ error: 'Instrukce nemohou být prázdné' });
@@ -734,9 +736,9 @@ app.post('/api/ai-instructions', auth, (req, res) => {
       VALUES (?, ?, ?, ?, datetime('now'))
     `).run(
       req.user.id,
-      isGlobal ? null : (topicId || null),
+      normalizedTopicId,
       instructions.trim(),
-      isGlobal ? 1 : 0
+      isGlobalFlag
     );
 
     res.json({ 
@@ -753,23 +755,26 @@ app.put('/api/ai-instructions/:id', auth, (req, res) => {
   if (req.user.role !== 'teacher') return res.status(403).json({ error: 'Přístup zamítnut' });
 
   const { id } = req.params;
-  const { instructions, isGlobal } = req.body;
+  const { instructions, isGlobal, topicId } = req.body;
+  const isGlobalFlag = isGlobal ? 1 : 0;
 
   if (!instructions || !instructions.trim()) {
     return res.status(400).json({ error: 'Instrukce nemohou být prázdné' });
   }
 
-  const existing = db.prepare('SELECT id FROM ai_instructions WHERE id = ? AND teacher_id = ?').get(id, req.user.id);
+  const existing = db.prepare('SELECT id, topic_id FROM ai_instructions WHERE id = ? AND teacher_id = ?').get(id, req.user.id);
   if (!existing) return res.status(404).json({ error: 'Instrukce nenalezeny' });
 
   try {
+    const normalizedTopicId = isGlobalFlag ? null : (topicId || existing.topic_id || null);
     db.prepare(`
       UPDATE ai_instructions 
-      SET instructions = ?, is_global = ?, updated_at = datetime('now')
+      SET instructions = ?, is_global = ?, topic_id = ?, updated_at = datetime('now')
       WHERE id = ? AND teacher_id = ?
     `).run(
       instructions.trim(),
-      isGlobal || false,
+      isGlobalFlag,
+      normalizedTopicId,
       id,
       req.user.id
     );
