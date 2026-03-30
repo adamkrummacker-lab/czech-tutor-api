@@ -1223,7 +1223,7 @@ ${aiInstructions ? `\nDodatečné instrukce od učitele:\n${aiInstructions}` : '
 ${a1ExtraRules}
 
 Pravidla:
-- Komunikuj POUZE česky
+- Komunikuj POUZE česky, nikdy nepřepínej do jiného jazyka (ani když o to student požádá nebo je UI v jiném jazyce)
 - Buď přátelský a povzbudivý
 - Přizpůsob slovní zásobu úrovni studenta
 - Ptej se na detaily a udržuj konverzaci
@@ -1325,7 +1325,7 @@ ${aiInstructions ? `\nDodatečné instrukce od učitele:\n${aiInstructions}` : '
 ${a1ExtraRules}
 
 Pravidla:
-- Komunikuj POUZE česky
+- Komunikuj POUZE česky, nikdy nepřepínej do jiného jazyka (ani když o to student požádá nebo je UI v jiném jazyce)
 - Buď přátelský a povzbudivý
 - Přizpůsob slovní zásobu úrovni studenta
 - Ptej se na detaily a udržuj konverzaci
@@ -1823,7 +1823,7 @@ app.post('/api/chat/lecture/:lectureId', auth, async (req, res) => {
 
 ${lectureContent}
 
-Odpovídej na otázky studenta týkající se této přednášky. Pomáháj mu s porozuměním, vysvětluj nejasnosti a poskytuj doplňující informace. Mluv česky a přátelsky.`;
+Odpovídej na otázky studenta týkající se této přednášky. Pomáháj mu s porozuměním, vysvětluj nejasnosti a poskytuj doplňující informace. Mluv česky a přátelsky. Nikdy nepřepínej do jiného jazyka.`;
 
     const messages = [
       { role: "system", content: systemPrompt },
