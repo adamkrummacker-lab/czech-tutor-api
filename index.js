@@ -252,11 +252,16 @@ if (userCount === 0) {
 }
 
 // Ensure admin user exists
-const adminExists = db.prepare("SELECT id FROM users WHERE role = 'admin'").get();
-if (!adminExists) {
+const adminByUsername = db.prepare('SELECT id, username FROM users WHERE username = ?').get(ADMIN_USERNAME);
+if (!adminByUsername) {
   const adminHash = bcrypt.hashSync(ADMIN_PASSWORD, 10);
   db.prepare('INSERT INTO users (username, password, role, name) VALUES (?, ?, ?, ?)').run(ADMIN_USERNAME, adminHash, 'admin', 'Admin');
   console.log('Admin user created');
+} else if (process.env.ADMIN_FORCE_RESET === 'true') {
+  const adminHash = bcrypt.hashSync(ADMIN_PASSWORD, 10);
+  db.prepare('UPDATE users SET password = ?, role = ?, name = ? WHERE username = ?')
+    .run(adminHash, 'admin', 'Admin', ADMIN_USERNAME);
+  console.log('Admin password reset from env');
 }
 
 // Ensure every teacher has at least one class (so students can join)
