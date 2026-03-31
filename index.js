@@ -30,6 +30,8 @@ app.use(express.json());
 
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 const JWT_SECRET = process.env.JWT_SECRET || 'czech-tutor-secret-key-2026';
+const ADMIN_USERNAME = process.env.ADMIN_USERNAME || 'admin';
+const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || 'admin';
 
 // Sequelize podpora (Postgres/SQLite) - step 1 (perzistence pro budoucí produkci)
 const { sequelize } = require('./db');
@@ -58,6 +60,14 @@ function generatePassword(length = 10) {
   let password = '';
   for (let i = 0; i < length; i++) password += chars[Math.floor(Math.random() * chars.length)];
   return password;
+}
+
+function ensureTeacherClass(teacherId, teacherName) {
+  const existing = db.prepare('SELECT id FROM classes WHERE teacher_id = ?').get(teacherId);
+  if (existing) return;
+  const joinCode = generateJoinCode();
+  db.prepare('INSERT INTO classes (name, teacher_id, join_code) VALUES (?, ?, ?)').run(`${teacherName} - Třída`, teacherId, joinCode);
+  console.log(`Created class for teacher ${teacherName} (code: ${joinCode})`);
 }
 
 // --- DATABASE SETUP ---
@@ -221,8 +231,10 @@ const userCount = db.prepare('SELECT COUNT(*) as cnt FROM users').get().cnt;
 if (userCount === 0) {
   const hash1 = bcrypt.hashSync('ucitel123', 10);
   const hash2 = bcrypt.hashSync('zak123', 10);
+  const adminHash = bcrypt.hashSync(ADMIN_PASSWORD, 10);
   db.prepare('INSERT INTO users (username, password, role, name) VALUES (?, ?, ?, ?)').run('ucitel', hash1, 'teacher', 'Učitel');
   db.prepare('INSERT INTO users (username, password, role, name) VALUES (?, ?, ?, ?)').run('zak', hash2, 'student', 'Žák Adam');
+  db.prepare('INSERT INTO users (username, password, role, name) VALUES (?, ?, ?, ?)').run(ADMIN_USERNAME, adminHash, 'admin', 'Admin');
   console.log('Default users created');
 
   // Create a default class for the teacher and add the default student into it
@@ -239,15 +251,18 @@ if (userCount === 0) {
   }
 }
 
+// Ensure admin user exists
+const adminExists = db.prepare("SELECT id FROM users WHERE role = 'admin'").get();
+if (!adminExists) {
+  const adminHash = bcrypt.hashSync(ADMIN_PASSWORD, 10);
+  db.prepare('INSERT INTO users (username, password, role, name) VALUES (?, ?, ?, ?)').run(ADMIN_USERNAME, adminHash, 'admin', 'Admin');
+  console.log('Admin user created');
+}
+
 // Ensure every teacher has at least one class (so students can join)
 const teachers = db.prepare("SELECT * FROM users WHERE role = 'teacher'").all();
 for (const t of teachers) {
-  const cls = db.prepare('SELECT * FROM classes WHERE teacher_id = ?').get(t.id);
-  if (!cls) {
-    const joinCode = generateJoinCode();
-    db.prepare('INSERT INTO classes (name, teacher_id, join_code) VALUES (?, ?, ?)').run(`${t.name} - Třída`, t.id, joinCode);
-    console.log(`Created class for teacher ${t.name} (code: ${joinCode})`);
-  }
+  ensureTeacherClass(t.id, t.name);
 }
 
 // --- TOPIC TEMPLATES ---
@@ -352,6 +367,13 @@ function requireTeacher(req, res, next) {
   next();
 }
 
+function requireAdmin(req, res, next) {
+  if (req.user.role !== 'admin') {
+    return res.status(403).json({ error: 'Přístup zamítnut' });
+  }
+  next();
+}
+
 function requireStudent(req, res, next) {
   if (req.user.role !== 'student') {
     return res.status(403).json({ error: 'Přístup zamítnut' });
@@ -434,6 +456,51 @@ app.post('/api/auth/register', (req, res) => {
   const result = db.prepare('INSERT INTO users (username, password, role, name, class_id) VALUES (?, ?, ?, ?, ?)').run(username, hash, 'student', name, classId);
   const token = jwt.sign({ id: result.lastInsertRowid, role: 'student' }, JWT_SECRET, { expiresIn: '7d' });
   res.status(201).json({ id: result.lastInsertRowid, username, role: 'student', name, token, preferences: {}, class: classInfo });
+});
+
+// --- ADMIN: TEACHER MANAGEMENT ---
+app.get('/api/admin/teachers', auth, requireAdmin, (req, res) => {
+  const teachers = db.prepare(
+    `SELECT u.id, u.username, u.name, u.created_at,
+            (SELECT COUNT(*) FROM classes c WHERE c.teacher_id = u.id) AS class_count,
+            (SELECT COUNT(*) FROM users s WHERE s.role = 'student' AND s.class_id IN (SELECT id FROM classes c2 WHERE c2.teacher_id = u.id)) AS student_count
+     FROM users u
+     WHERE u.role = 'teacher'
+     ORDER BY u.created_at DESC`
+  ).all();
+  res.json({ teachers });
+});
+
+app.post('/api/admin/teachers', auth, requireAdmin, (req, res) => {
+  const { username, password, name } = req.body || {};
+  if (!username || !name) {
+    return res.status(400).json({ error: 'Chybí username nebo jméno' });
+  }
+  const existing = db.prepare('SELECT id FROM users WHERE username = ?').get(username);
+  if (existing) return res.status(409).json({ error: 'Uživatel už existuje' });
+
+  const finalPassword = password?.trim() || generatePassword();
+  const hash = bcrypt.hashSync(finalPassword, 10);
+  const result = db.prepare('INSERT INTO users (username, password, role, name) VALUES (?, ?, ?, ?)').run(username.trim(), hash, 'teacher', name.trim());
+  ensureTeacherClass(result.lastInsertRowid, name.trim());
+  logAudit(req.user.id, 'admin_create_teacher', 'user', result.lastInsertRowid, { username, name });
+  res.status(201).json({ id: result.lastInsertRowid, username: username.trim(), name: name.trim(), password: password ? null : finalPassword });
+});
+
+app.delete('/api/admin/teachers/:id', auth, requireAdmin, (req, res) => {
+  const teacherId = Number(req.params.id);
+  const teacher = db.prepare("SELECT id, name FROM users WHERE id = ? AND role = 'teacher'").get(teacherId);
+  if (!teacher) return res.status(404).json({ error: 'Učitel nenalezen' });
+
+  const classIds = db.prepare('SELECT id FROM classes WHERE teacher_id = ?').all(teacherId).map(r => r.id);
+  if (classIds.length > 0) {
+    const placeholders = classIds.map(() => '?').join(',');
+    db.prepare(`UPDATE users SET class_id = NULL WHERE class_id IN (${placeholders})`).run(...classIds);
+    db.prepare(`DELETE FROM classes WHERE id IN (${placeholders})`).run(...classIds);
+  }
+  db.prepare('DELETE FROM users WHERE id = ?').run(teacherId);
+  logAudit(req.user.id, 'admin_delete_teacher', 'user', teacherId, { name: teacher.name });
+  res.json({ ok: true });
 });
 
 
