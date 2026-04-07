@@ -217,6 +217,10 @@ if (!userColumns.includes('preferences')) {
 if (!userColumns.includes('class_id')) {
   db.prepare("ALTER TABLE users ADD COLUMN class_id INTEGER").run();
 }
+if (!userColumns.includes('email')) {
+  db.prepare("ALTER TABLE users ADD COLUMN email TEXT").run();
+}
+db.prepare('CREATE UNIQUE INDEX IF NOT EXISTS idx_users_email ON users(email)').run();
 
 const evaluationColumns = db.prepare("PRAGMA table_info(evaluations)").all().map(r => r.name);
 if (!evaluationColumns.includes('quiz_score')) {
@@ -429,7 +433,8 @@ app.get('/api/auth/register', (req, res) => {
 
 app.post('/api/auth/login', (req, res) => {
   const { username, password } = req.body;
-  const user = db.prepare('SELECT * FROM users WHERE username = ?').get(username);
+  const identifier = (username || '').trim().toLowerCase();
+  const user = db.prepare('SELECT * FROM users WHERE username = ? OR email = ?').get(identifier, identifier);
   if (!user || !bcrypt.compareSync(password, user.password)) {
     return res.status(401).json({ error: 'Špatné přihlašovací údaje' });
   }
@@ -440,13 +445,20 @@ app.post('/api/auth/login', (req, res) => {
 });
 
 app.post('/api/auth/register', (req, res) => {
-  const { username, password, name, classCode } = req.body;
+  const { username, password, name, classCode, email } = req.body;
   if (!username || !password || !name) return res.status(400).json({ error: 'Vyplň všechna pole' });
   if (username.length < 3) return res.status(400).json({ error: 'Uživatelské jméno musí mít min. 3 znaky' });
   if (password.length < 4) return res.status(400).json({ error: 'Heslo musí mít min. 4 znaky' });
 
-  const existing = db.prepare('SELECT id FROM users WHERE username = ?').get(username);
+  const normalizedUsername = username.trim().toLowerCase();
+  const normalizedEmail = email ? email.trim().toLowerCase() : null;
+  const existing = db.prepare('SELECT id FROM users WHERE username = ?').get(normalizedUsername);
   if (existing) return res.status(409).json({ error: 'Uživatelské jméno je obsazené' });
+  if (normalizedEmail) {
+    if (!normalizedEmail.includes('@')) return res.status(400).json({ error: 'Neplatný email' });
+    const emailTaken = db.prepare('SELECT id FROM users WHERE email = ?').get(normalizedEmail);
+    if (emailTaken) return res.status(409).json({ error: 'Email je už použitý' });
+  }
 
   let classId = null;
   let classInfo = null;
@@ -458,15 +470,15 @@ app.post('/api/auth/register', (req, res) => {
   }
 
   const hash = bcrypt.hashSync(password, 10);
-  const result = db.prepare('INSERT INTO users (username, password, role, name, class_id) VALUES (?, ?, ?, ?, ?)').run(username, hash, 'student', name, classId);
+  const result = db.prepare('INSERT INTO users (username, password, role, name, class_id, email) VALUES (?, ?, ?, ?, ?, ?)').run(normalizedUsername, hash, 'student', name, classId, normalizedEmail);
   const token = jwt.sign({ id: result.lastInsertRowid, role: 'student' }, JWT_SECRET, { expiresIn: '7d' });
-  res.status(201).json({ id: result.lastInsertRowid, username, role: 'student', name, token, preferences: {}, class: classInfo });
+  res.status(201).json({ id: result.lastInsertRowid, username: normalizedUsername, role: 'student', name, token, preferences: {}, class: classInfo });
 });
 
 // --- ADMIN: TEACHER MANAGEMENT ---
 app.get('/api/admin/teachers', auth, requireAdmin, (req, res) => {
   const teachers = db.prepare(
-    `SELECT u.id, u.username, u.name, u.created_at,
+    `SELECT u.id, u.username, u.name, u.email, u.created_at,
             (SELECT COUNT(*) FROM classes c WHERE c.teacher_id = u.id) AS class_count,
             (SELECT COUNT(*) FROM users s WHERE s.role = 'student' AND s.class_id IN (SELECT id FROM classes c2 WHERE c2.teacher_id = u.id)) AS student_count
      FROM users u
@@ -477,19 +489,26 @@ app.get('/api/admin/teachers', auth, requireAdmin, (req, res) => {
 });
 
 app.post('/api/admin/teachers', auth, requireAdmin, (req, res) => {
-  const { username, password, name } = req.body || {};
+  const { username, password, name, email } = req.body || {};
   if (!username || !name) {
     return res.status(400).json({ error: 'Chybí username nebo jméno' });
   }
-  const existing = db.prepare('SELECT id FROM users WHERE username = ?').get(username);
+  const normalizedUsername = username.trim().toLowerCase();
+  const normalizedEmail = email ? email.trim().toLowerCase() : null;
+  const existing = db.prepare('SELECT id FROM users WHERE username = ?').get(normalizedUsername);
   if (existing) return res.status(409).json({ error: 'Uživatel už existuje' });
+  if (normalizedEmail) {
+    if (!normalizedEmail.includes('@')) return res.status(400).json({ error: 'Neplatný email' });
+    const emailTaken = db.prepare('SELECT id FROM users WHERE email = ?').get(normalizedEmail);
+    if (emailTaken) return res.status(409).json({ error: 'Email je už použitý' });
+  }
 
   const finalPassword = password?.trim() || generatePassword();
   const hash = bcrypt.hashSync(finalPassword, 10);
-  const result = db.prepare('INSERT INTO users (username, password, role, name) VALUES (?, ?, ?, ?)').run(username.trim(), hash, 'teacher', name.trim());
+  const result = db.prepare('INSERT INTO users (username, password, role, name, email) VALUES (?, ?, ?, ?, ?)').run(normalizedUsername, hash, 'teacher', name.trim(), normalizedEmail);
   ensureTeacherClass(result.lastInsertRowid, name.trim());
-  logAudit(req.user.id, 'admin_create_teacher', 'user', result.lastInsertRowid, { username, name });
-  res.status(201).json({ id: result.lastInsertRowid, username: username.trim(), name: name.trim(), password: password ? null : finalPassword });
+  logAudit(req.user.id, 'admin_create_teacher', 'user', result.lastInsertRowid, { username: normalizedUsername, name, email: normalizedEmail });
+  res.status(201).json({ id: result.lastInsertRowid, username: normalizedUsername, name: name.trim(), email: normalizedEmail, password: password ? null : finalPassword });
 });
 
 app.delete('/api/admin/teachers/:id', auth, requireAdmin, (req, res) => {
