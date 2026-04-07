@@ -7,6 +7,7 @@ const jwt = require('jsonwebtoken');
 const bcrypt = require('bcryptjs');
 const path = require('path');
 const { execSync } = require('child_process');
+const crypto = require('crypto');
 
 const app = express();
 
@@ -32,6 +33,11 @@ const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 const JWT_SECRET = process.env.JWT_SECRET || 'czech-tutor-secret-key-2026';
 const ADMIN_USERNAME = process.env.ADMIN_USERNAME || 'admin';
 const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || 'admin';
+const APP_BASE_URL = process.env.APP_BASE_URL || 'http://localhost:5173';
+const EMAIL_VERIFY_TTL_HOURS = Number(process.env.EMAIL_VERIFY_TTL_HOURS || 24);
+const EMAIL_RESEND_COOLDOWN_SECONDS = Number(process.env.EMAIL_RESEND_COOLDOWN_SECONDS || 120);
+const PASSWORD_RESET_TTL_HOURS = Number(process.env.PASSWORD_RESET_TTL_HOURS || 2);
+const PASSWORD_RESET_COOLDOWN_SECONDS = Number(process.env.PASSWORD_RESET_COOLDOWN_SECONDS || 120);
 
 // Sequelize podpora (Postgres/SQLite) - step 1 (perzistence pro budoucí produkci)
 const { sequelize } = require('./db');
@@ -60,6 +66,114 @@ function generatePassword(length = 10) {
   let password = '';
   for (let i = 0; i < length; i++) password += chars[Math.floor(Math.random() * chars.length)];
   return password;
+}
+
+function normalizeEmail(email) {
+  if (!email) return null;
+  return email.trim().toLowerCase();
+}
+
+function hashToken(token) {
+  return crypto.createHash('sha256').update(token).digest('hex');
+}
+
+function buildVerificationLink(token) {
+  const url = new URL(APP_BASE_URL);
+  url.searchParams.set('verify', token);
+  return url.toString();
+}
+
+function buildPasswordResetLink(token) {
+  const url = new URL(APP_BASE_URL);
+  url.searchParams.set('reset', token);
+  return url.toString();
+}
+
+function getEmailTransport() {
+  if (!process.env.SMTP_HOST) return null;
+  let nodemailer = null;
+  try {
+    // Lazy require so the server still runs even if dependency isn't installed yet.
+    // eslint-disable-next-line global-require
+    nodemailer = require('nodemailer');
+  } catch {
+    console.warn('nodemailer not installed; email will be logged to console');
+    return null;
+  }
+  const port = Number(process.env.SMTP_PORT || 587);
+  return nodemailer.createTransport({
+    host: process.env.SMTP_HOST,
+    port,
+    secure: port === 465,
+    auth: process.env.SMTP_USER ? {
+      user: process.env.SMTP_USER,
+      pass: process.env.SMTP_PASS,
+    } : undefined,
+  });
+}
+
+async function sendVerificationEmail(user, token) {
+  const link = buildVerificationLink(token);
+  const subject = 'Ověření emailu – Kámo';
+  const text = `Ahoj ${user.name},\n\nOvěř prosím svůj email kliknutím na odkaz:\n${link}\n\nOdkaz platí ${EMAIL_VERIFY_TTL_HOURS} hodin.\n`;
+
+  const transporter = getEmailTransport();
+  if (!transporter) {
+    console.log('[EMAIL] Verification link for', user.email, ':', link);
+    return { sent: false, link };
+  }
+
+  const from = process.env.SMTP_FROM || 'Kámo <no-reply@kamo.app>';
+  await transporter.sendMail({
+    from,
+    to: user.email,
+    subject,
+    text,
+  });
+  return { sent: true };
+}
+
+async function sendPasswordResetEmail(user, token) {
+  const link = buildPasswordResetLink(token);
+  const subject = 'Obnovení hesla – Kámo';
+  const text = `Ahoj ${user.name},\n\nKlikni na odkaz pro nastavení nového hesla:\n${link}\n\nOdkaz platí ${PASSWORD_RESET_TTL_HOURS} hodin.\n`;
+
+  const transporter = getEmailTransport();
+  if (!transporter) {
+    console.log('[EMAIL] Password reset link for', user.email, ':', link);
+    return { sent: false, link };
+  }
+
+  const from = process.env.SMTP_FROM || 'Kámo <no-reply@kamo.app>';
+  await transporter.sendMail({
+    from,
+    to: user.email,
+    subject,
+    text,
+  });
+  return { sent: true };
+}
+
+function createEmailVerification(userId, email) {
+  const token = crypto.randomBytes(32).toString('hex');
+  const tokenHash = hashToken(token);
+  const expiresAt = new Date(Date.now() + EMAIL_VERIFY_TTL_HOURS * 3600 * 1000).toISOString();
+  const now = new Date().toISOString();
+  db.prepare(
+    'UPDATE users SET email_verification_token = ?, email_verification_expires = ?, email_verification_sent_at = ?, email_verified = 0 WHERE id = ?'
+  ).run(tokenHash, expiresAt, now, userId);
+  return token;
+}
+
+function createPasswordReset(userId) {
+  const token = crypto.randomBytes(32).toString('hex');
+  const tokenHash = hashToken(token);
+  const expiresAt = new Date(Date.now() + PASSWORD_RESET_TTL_HOURS * 3600 * 1000).toISOString();
+  const now = new Date().toISOString();
+  db.prepare(
+    'UPDATE users SET password_reset_token = ?, password_reset_expires = ?, password_reset_sent_at = ? WHERE id = ?'
+  ).run(tokenHash, expiresAt, now, userId);
+  return token;
 }
 
 function ensureTeacherClass(teacherId, teacherName) {
@@ -219,6 +333,27 @@ if (!userColumns.includes('class_id')) {
 }
 if (!userColumns.includes('email')) {
   db.prepare("ALTER TABLE users ADD COLUMN email TEXT").run();
+}
+if (!userColumns.includes('email_verified')) {
+  db.prepare("ALTER TABLE users ADD COLUMN email_verified INTEGER DEFAULT 0").run();
+}
+if (!userColumns.includes('email_verification_token')) {
+  db.prepare("ALTER TABLE users ADD COLUMN email_verification_token TEXT").run();
+}
+if (!userColumns.includes('email_verification_expires')) {
+  db.prepare("ALTER TABLE users ADD COLUMN email_verification_expires TEXT").run();
+}
+if (!userColumns.includes('email_verification_sent_at')) {
+  db.prepare("ALTER TABLE users ADD COLUMN email_verification_sent_at TEXT").run();
+}
+if (!userColumns.includes('password_reset_token')) {
+  db.prepare("ALTER TABLE users ADD COLUMN password_reset_token TEXT").run();
+}
+if (!userColumns.includes('password_reset_expires')) {
+  db.prepare("ALTER TABLE users ADD COLUMN password_reset_expires TEXT").run();
+}
+if (!userColumns.includes('password_reset_sent_at')) {
+  db.prepare("ALTER TABLE users ADD COLUMN password_reset_sent_at TEXT").run();
 }
 db.prepare('CREATE UNIQUE INDEX IF NOT EXISTS idx_users_email ON users(email)').run();
 
@@ -438,20 +573,23 @@ app.post('/api/auth/login', (req, res) => {
   if (!user || !bcrypt.compareSync(password, user.password)) {
     return res.status(401).json({ error: 'Špatné přihlašovací údaje' });
   }
+  if (user.email && !user.email_verified) {
+    return res.status(403).json({ error: 'Email není ověřen', needsVerification: true, email: user.email });
+  }
   const token = jwt.sign({ id: user.id, role: user.role }, JWT_SECRET, { expiresIn: '7d' });
   let preferences = {};
   try { preferences = user.preferences ? JSON.parse(user.preferences) : {}; } catch {}
   res.json({ id: user.id, username: user.username, role: user.role, name: user.name, preferences, token });
 });
 
-app.post('/api/auth/register', (req, res) => {
+app.post('/api/auth/register', async (req, res) => {
   const { username, password, name, classCode, email } = req.body;
   if (!username || !password || !name) return res.status(400).json({ error: 'Vyplň všechna pole' });
   if (username.length < 3) return res.status(400).json({ error: 'Uživatelské jméno musí mít min. 3 znaky' });
   if (password.length < 4) return res.status(400).json({ error: 'Heslo musí mít min. 4 znaky' });
 
   const normalizedUsername = username.trim().toLowerCase();
-  const normalizedEmail = email ? email.trim().toLowerCase() : null;
+  const normalizedEmail = normalizeEmail(email);
   const existing = db.prepare('SELECT id FROM users WHERE username = ?').get(normalizedUsername);
   if (existing) return res.status(409).json({ error: 'Uživatelské jméno je obsazené' });
   if (normalizedEmail) {
@@ -470,9 +608,125 @@ app.post('/api/auth/register', (req, res) => {
   }
 
   const hash = bcrypt.hashSync(password, 10);
-  const result = db.prepare('INSERT INTO users (username, password, role, name, class_id, email) VALUES (?, ?, ?, ?, ?, ?)').run(normalizedUsername, hash, 'student', name, classId, normalizedEmail);
+  const result = db.prepare('INSERT INTO users (username, password, role, name, class_id, email, email_verified) VALUES (?, ?, ?, ?, ?, ?, ?)').run(
+    normalizedUsername,
+    hash,
+    'student',
+    name,
+    classId,
+    normalizedEmail,
+    normalizedEmail ? 0 : 1
+  );
+
+  if (normalizedEmail) {
+    const token = createEmailVerification(result.lastInsertRowid, normalizedEmail);
+    try {
+      await sendVerificationEmail({ id: result.lastInsertRowid, name, email: normalizedEmail }, token);
+    } catch (err) {
+      console.warn('Email verification send failed:', err.message);
+    }
+    return res.status(201).json({ needsVerification: true, email: normalizedEmail, class: classInfo });
+  }
+
   const token = jwt.sign({ id: result.lastInsertRowid, role: 'student' }, JWT_SECRET, { expiresIn: '7d' });
   res.status(201).json({ id: result.lastInsertRowid, username: normalizedUsername, role: 'student', name, token, preferences: {}, class: classInfo });
+});
+
+app.get('/api/auth/verify-email', (req, res) => {
+  const token = (req.query.token || req.query.verify || '').toString().trim();
+  if (!token) return res.status(400).json({ error: 'Chybí token' });
+  const tokenHash = hashToken(token);
+  const user = db.prepare(
+    'SELECT id, email, email_verification_expires FROM users WHERE email_verification_token = ?'
+  ).get(tokenHash);
+  if (!user) return res.status(400).json({ error: 'Token je neplatný' });
+  if (user.email_verification_expires && new Date(user.email_verification_expires) < new Date()) {
+    return res.status(400).json({ error: 'Token expiroval' });
+  }
+  db.prepare(
+    'UPDATE users SET email_verified = 1, email_verification_token = NULL, email_verification_expires = NULL, email_verification_sent_at = NULL WHERE id = ?'
+  ).run(user.id);
+  res.json({ ok: true, email: user.email });
+});
+
+app.post('/api/auth/resend-verification', async (req, res) => {
+  const identifier = (req.body?.identifier || '').trim().toLowerCase();
+  if (!identifier) return res.status(400).json({ error: 'Chybí email nebo uživatelské jméno' });
+
+  const user = db.prepare(
+    'SELECT id, name, email, email_verified, email_verification_sent_at FROM users WHERE username = ? OR email = ?'
+  ).get(identifier, identifier);
+  if (!user || !user.email) return res.status(404).json({ error: 'Uživatel s emailem nenalezen' });
+  if (user.email_verified) return res.status(400).json({ error: 'Email už je ověřený' });
+
+  if (user.email_verification_sent_at) {
+    const lastSent = new Date(user.email_verification_sent_at);
+    const diffSeconds = (Date.now() - lastSent.getTime()) / 1000;
+    if (diffSeconds < EMAIL_RESEND_COOLDOWN_SECONDS) {
+      return res.status(429).json({ error: 'Zkus to znovu za chvíli' });
+    }
+  }
+
+  const token = createEmailVerification(user.id, user.email);
+  try {
+    await sendVerificationEmail({ id: user.id, name: user.name, email: user.email }, token);
+  } catch (err) {
+    console.warn('Email verification resend failed:', err.message);
+  }
+  res.json({ ok: true });
+});
+
+app.post('/api/auth/request-password-reset', async (req, res) => {
+  const identifier = (req.body?.identifier || '').trim().toLowerCase();
+  if (!identifier) return res.status(400).json({ error: 'Chybí email nebo uživatelské jméno' });
+
+  const user = db.prepare(
+    'SELECT id, name, email, password_reset_sent_at FROM users WHERE username = ? OR email = ?'
+  ).get(identifier, identifier);
+
+  if (!user || !user.email) {
+    // Do not reveal whether user exists
+    return res.json({ ok: true });
+  }
+
+  if (user.password_reset_sent_at) {
+    const lastSent = new Date(user.password_reset_sent_at);
+    const diffSeconds = (Date.now() - lastSent.getTime()) / 1000;
+    if (diffSeconds < PASSWORD_RESET_COOLDOWN_SECONDS) {
+      return res.status(429).json({ error: 'Zkus to znovu za chvíli' });
+    }
+  }
+
+  const token = createPasswordReset(user.id);
+  try {
+    await sendPasswordResetEmail({ id: user.id, name: user.name, email: user.email }, token);
+  } catch (err) {
+    console.warn('Password reset email failed:', err.message);
+  }
+  res.json({ ok: true });
+});
+
+app.post('/api/auth/reset-password', (req, res) => {
+  const { token, newPassword } = req.body || {};
+  if (!token || !newPassword) {
+    return res.status(400).json({ error: 'Chybí token nebo nové heslo' });
+  }
+  if (newPassword.length < 4) return res.status(400).json({ error: 'Heslo musí mít min. 4 znaky' });
+
+  const tokenHash = hashToken(token.toString().trim());
+  const user = db.prepare(
+    'SELECT id, password_reset_expires FROM users WHERE password_reset_token = ?'
+  ).get(tokenHash);
+  if (!user) return res.status(400).json({ error: 'Token je neplatný' });
+  if (user.password_reset_expires && new Date(user.password_reset_expires) < new Date()) {
+    return res.status(400).json({ error: 'Token expiroval' });
+  }
+
+  const hash = bcrypt.hashSync(newPassword, 10);
+  db.prepare(
+    'UPDATE users SET password = ?, password_reset_token = NULL, password_reset_expires = NULL, password_reset_sent_at = NULL WHERE id = ?'
+  ).run(hash, user.id);
+  res.json({ ok: true });
 });
 
 // --- ADMIN: TEACHER MANAGEMENT ---
@@ -488,13 +742,13 @@ app.get('/api/admin/teachers', auth, requireAdmin, (req, res) => {
   res.json({ teachers });
 });
 
-app.post('/api/admin/teachers', auth, requireAdmin, (req, res) => {
+app.post('/api/admin/teachers', auth, requireAdmin, async (req, res) => {
   const { username, password, name, email } = req.body || {};
   if (!username || !name) {
     return res.status(400).json({ error: 'Chybí username nebo jméno' });
   }
   const normalizedUsername = username.trim().toLowerCase();
-  const normalizedEmail = email ? email.trim().toLowerCase() : null;
+  const normalizedEmail = normalizeEmail(email);
   const existing = db.prepare('SELECT id FROM users WHERE username = ?').get(normalizedUsername);
   if (existing) return res.status(409).json({ error: 'Uživatel už existuje' });
   if (normalizedEmail) {
@@ -505,9 +759,24 @@ app.post('/api/admin/teachers', auth, requireAdmin, (req, res) => {
 
   const finalPassword = password?.trim() || generatePassword();
   const hash = bcrypt.hashSync(finalPassword, 10);
-  const result = db.prepare('INSERT INTO users (username, password, role, name, email) VALUES (?, ?, ?, ?, ?)').run(normalizedUsername, hash, 'teacher', name.trim(), normalizedEmail);
+  const result = db.prepare('INSERT INTO users (username, password, role, name, email, email_verified) VALUES (?, ?, ?, ?, ?, ?)').run(
+    normalizedUsername,
+    hash,
+    'teacher',
+    name.trim(),
+    normalizedEmail,
+    normalizedEmail ? 0 : 1
+  );
   ensureTeacherClass(result.lastInsertRowid, name.trim());
   logAudit(req.user.id, 'admin_create_teacher', 'user', result.lastInsertRowid, { username: normalizedUsername, name, email: normalizedEmail });
+  if (normalizedEmail) {
+    const token = createEmailVerification(result.lastInsertRowid, normalizedEmail);
+    try {
+      await sendVerificationEmail({ id: result.lastInsertRowid, name: name.trim(), email: normalizedEmail }, token);
+    } catch (err) {
+      console.warn('Email verification send failed:', err.message);
+    }
+  }
   res.status(201).json({ id: result.lastInsertRowid, username: normalizedUsername, name: name.trim(), email: normalizedEmail, password: password ? null : finalPassword });
 });
 
